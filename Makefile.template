@@ -1,0 +1,50 @@
+# OXDK Project Makefile Template
+#
+# Copy this file to your project directory as "Makefile" and edit the
+# settings below. Then run: make
+#
+# Prerequisites:
+#   - OXDK checked out somewhere on your system
+#   - XDK libs in OXDK/xdk/lib/ and headers in OXDK/xdk/include/
+#   - clang and lld-link on your PATH
+
+# Path to your OXDK checkout
+OXDK_DIR = $(HOME)/OXDK
+
+# XBE settings
+XBE_TITLE = My App
+XBE_MODE  = RETAIL
+
+# Your source files
+SRCS = main.cpp
+
+# Build type: uncomment one
+# --- Debug (with debug D3D validation) ---
+#CXXFLAGS += -O0 -g -D_DEBUG
+#OXDK_LIBS = libcmtd.lib libcpmtd.lib xboxkrnl.lib \
+#	d3d8d.lib d3dx8d.lib xgraphicsd.lib dsoundd.lib \
+#	xnetd.lib xonlined.lib xbdm.lib \
+#	xapilibd.lib xapilib.lib xapilibp.lib
+
+# --- Release ---
+CXXFLAGS += -O2
+OXDK_LIBS = libcmt.lib libcpmt.lib xboxkrnl.lib \
+	d3d8.lib d3dx8.lib xgraphics.lib dsound.lib \
+	xnet.lib xonline.lib \
+	xapilib.lib xapilibp.lib
+
+# Additional libs your project needs (optional)
+#LIBS = somelib.lib
+
+# Additional include paths (optional)
+#CXXFLAGS += -I./include
+
+# Additional kernel import decorations (optional)
+# Add these if you get "undefined symbol: __imp__SomeKernelFunction" errors
+#LDFLAGS += /alternatename:__imp__SomeFunction=__imp__SomeFunction@N
+
+# If you need private XDK libs, set the path
+#XDK_PRV_DIR = /path/to/xbox/private
+#LDFLAGS += /libpath:$(XDK_PRV_DIR)/lib/i386
+
+include $(OXDK_DIR)/oxdk.mk

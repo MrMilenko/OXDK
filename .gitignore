@@ -1,0 +1,15 @@
+# XDK files -- users must supply their own
+xdk/lib/*.lib
+xdk/include/*.h
+xdk/include/**
+
+# Build output
+bin/
+*.obj
+*.exe
+*.xbe
+*.map
+*.pdb
+
+# cxbe binary
+tools/cxbe/cxbe
