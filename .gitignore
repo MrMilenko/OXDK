@@ -1,7 +1,7 @@
 # XDK files -- users must supply their own
 xdk/lib/*.lib
-xdk/include/*.h
-xdk/include/**
+xdk/include/*
+!xdk/include/.gitkeep
 
 # Build output (but not the bin/ wrapper scripts)
 **/bin/*.obj
