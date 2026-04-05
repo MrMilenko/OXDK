@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+# oxdk-link -- Linker wrapper for Xbox XDK cross-compilation
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+lld-link \
+    /nologo \
+    /subsystem:windows \
+    /fixed:no \
+    /base:0x00010000 \
+    /stack:1048576 \
+    /machine:x86 \
+    /entry:mainCRTStartup \
+    /nodefaultlib \
+    /force:multiple \
+    /safeseh:no \
+    /merge:.edata=.edataxb \
+    /errorlimit:0 \
+    /libpath:"${SCRIPT_DIR}/xdk/lib" \
+    "$@"

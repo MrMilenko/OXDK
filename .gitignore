@@ -3,8 +3,11 @@ xdk/lib/*.lib
 xdk/include/*.h
 xdk/include/**
 
-# Build output
-bin/
+# Build output (but not the bin/ wrapper scripts)
+**/bin/*.obj
+**/bin/*.exe
+**/bin/*.xbe
+**/bin/*.map
 *.obj
 *.exe
 *.xbe
@@ -13,3 +16,4 @@ bin/
 
 # cxbe binary
 tools/cxbe/cxbe
+.DS_Store

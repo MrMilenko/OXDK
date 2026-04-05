@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# oxdk-cc -- C compiler wrapper for Xbox XDK cross-compilation
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+clang \
+    -target i386-pc-windows-msvc \
+    -march=pentium3 \
+    -fms-extensions \
+    -fms-compatibility \
+    -fms-compatibility-version=13.10 \
+    -D_XBOX -D_X86_ -DWIN32_LEAN_AND_MEAN \
+    -Wno-microsoft-include -Wno-pragma-pack -Wno-ignored-pragmas \
+    -Wno-deprecated-declarations -Wno-writable-strings -Wno-microsoft-cast \
+    -Wno-unknown-pragmas -Wno-extra-tokens -Wno-nonportable-include-path \
+    -Wno-typedef-redefinition \
+    -D_NTOS_ \
+    -I"${SCRIPT_DIR}/xdk/include" \
+    "$@"
