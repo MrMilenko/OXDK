@@ -41,12 +41,11 @@ OXDK_TARGET_FLAGS = -target i386-pc-windows-msvc -march=pentium3 \
 	-fdelayed-template-parsing
 
 OXDK_CFLAGS = $(OXDK_TARGET_FLAGS) -c \
-	-D_XBOX -D_X86_ -DWIN32_LEAN_AND_MEAN \
+	-D_XBOX -D_X86_ -DWIN32_LEAN_AND_MEAN -D_NTOS_ \
 	-Wno-microsoft-include -Wno-pragma-pack -Wno-ignored-pragmas \
 	-Wno-deprecated-declarations -Wno-writable-strings -Wno-microsoft-cast \
 	-Wno-unknown-pragmas -Wno-extra-tokens -Wno-nonportable-include-path \
 	-Wno-typedef-redefinition \
-	-include $(OXDK_DIR)/xdk_compat.h \
 	-I$(OXDK_DIR) -I$(XDK_DIR)/include
 
 # C++ flags -- MSVC /Gz (__stdcall default) is MANDATORY for XDK compatibility
@@ -73,8 +72,8 @@ OXDK_KERNEL_IMPORTS = \
 	/alternatename:__imp__IoDismountVolumeByName=__imp__IoDismountVolumeByName@4 \
 	/alternatename:__imp__MmFreeContiguousMemory=__imp__MmFreeContiguousMemory@4
 
-# Default XDK libs (debug). Override OXDK_LIBS in your Makefile for release.
-OXDK_LIBS = libcmtd.lib libcpmtd.lib xboxkrnl.lib \
+# Default XDK libs (debug). Override OXDK_LIBS in your Makefile before including oxdk.mk.
+OXDK_LIBS ?= libcmtd.lib libcpmtd.lib xboxkrnl.lib \
 	d3d8d.lib d3dx8d.lib xgraphicsd.lib dsoundd.lib \
 	xnetd.lib xonlined.lib xbdm.lib \
 	xapilibd.lib xapilib.lib xapilibp.lib

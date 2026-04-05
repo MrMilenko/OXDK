@@ -59,7 +59,7 @@ cd examples/hello
 make
 ```
 
-If it builds to `bin/default.xbe`, you're good. Copy that to your Xbox and you should see a green screen.
+If it builds to `bin/default.xbe`, you're good. Copy that to your Xbox and you should see a sea creature bouncing around the screen.
 
 ## Usage
 
@@ -167,7 +167,7 @@ OXDK/
     oxdk-cxx           C++ compiler wrapper
     oxdk-link          linker wrapper
   examples/
-    hello/             minimal D3D test app (green screen)
+    hello/             minimal D3D test app (definitely not a dolphin)
   tools/
     cxbe/              PE-to-XBE converter from NXDK, tweaked for XDK binaries
   xdk/

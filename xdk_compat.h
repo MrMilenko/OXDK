@@ -1,7 +1,10 @@
 // xdk_compat.h -- Compatibility shim for building Xbox XDK code with clang
 //
 // Force-include this file (-include xdk_compat.h) when cross-compiling
-// MS XDK projects with clang + lld-link.
+// MS XDK projects that use private NT kernel headers (ntdef.h, nti386.h, etc).
+//
+// For projects that only use the public XDK headers (xtl.h, d3d8.h, etc),
+// you don't need this file. Just add -D_NTOS_ to your compiler flags.
 
 #ifndef _XDK_COMPAT_H
 #define _XDK_COMPAT_H
