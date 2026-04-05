@@ -4,6 +4,8 @@ A cross-compilation shim that lets you build original Xbox XDK projects on macOS
 
 Built for [Theseus](https://github.com/MrMilenko/Theseus) development because using a Windows VM to compile 2003-era C++ is a crime against humanity. Also because the author tore his meniscus and fractured two ribs, and waddling between computers to load Windows VMs while on a drug-fueled surgery bender seemed like a problem worth solving permanently.
 
+When we say "we" in this document, it's the royal We. It sounds better than "I did this alone in my living room on painkillers." Tested on real hardware by members of [TeamUIX](https://github.com/OfficialTeamUIX).
+
 ## What This Is
 
 OXDK bridges the gap between modern clang and the Microsoft Xbox SDK (circa 2003). It handles the ABI differences, calling conventions, header conflicts, and PE-to-XBE conversion needed to produce bootable Xbox executables from a Unix-based host.
@@ -144,10 +146,10 @@ Xbox XDK projects compile with MSVC's `/Gz` flag, making `__stdcall` the default
 **XDK Header Compatibility (`xdk_compat.h`)**
 The XDK headers assume MSVC-specific include ordering for NT kernel types. The compat shim pulls in the right type definitions before the XDK headers try to define their own, preventing redefinition conflicts.
 
-**cxbe Patches (section flags, library versions)**
-cxbe (originally from NXDK) needed two changes for XDK binaries:
-- All XBE sections must be marked executable (the Xbox kernel requires this for proper page mapping)
-- Library version entries must be read from the PE's `.XBLD` section (the kernel uses these to initialize D3D, DirectSound, XAPI, and other subsystems, without them nothing starts up)
+**cxbe Tweaks (section flags, library versions)**
+cxbe from NXDK handles PE-to-XBE conversion. During testing we made two tweaks for XDK-linked binaries, and things started working. Whether these are strictly necessary or if the calling convention fix above was the real solution, we're honestly not sure, they were made during the debugging process and we never went back to test without them:
+- All XBE sections are marked executable
+- Library version entries are read from the PE's `.XBLD` section instead of using a placeholder
 
 ## Limitations
 
@@ -167,7 +169,7 @@ OXDK/
   examples/
     hello/             minimal D3D test app (green screen)
   tools/
-    cxbe/              patched PE-to-XBE converter (builds from source)
+    cxbe/              PE-to-XBE converter from NXDK, tweaked for XDK binaries
   xdk/
     lib/               drop your XDK .lib files here
     include/           drop your XDK headers here
