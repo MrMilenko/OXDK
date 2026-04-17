@@ -24,6 +24,7 @@ This is not [NXDK](https://github.com/XboxDev/nxdk). NXDK is an open-source Xbox
   - Linux: install the `lld` package from your distro
 - **Microsoft Xbox SDK** headers and libraries (you supply these)
 - **make** (GNU make)
+- **Python 3** and **Pillow** — optional, only needed for `tools/xbx/xbx_convert.py` (`pip install Pillow`)
 
 ## Getting Started
 
@@ -52,7 +53,23 @@ cp -r /path/to/xdk/include/ xdk/include/
 
 You need at minimum: `xboxkrnl.lib`, `d3d8.lib` (or `d3d8d.lib`), `xapilib.lib`, `libcmt.lib` (or `libcmtd.lib`), and the corresponding headers.
 
-### 4. Verify
+### 4. Normalize filename case (Linux / case-sensitive filesystems)
+
+The XDK ships with mixed-case filenames (`XTL.H`, `D3d8.h`, ...) but source code refers to them in lowercase (`#include <xtl.h>`). macOS's default filesystem doesn't care; Linux does. Run this once after copying files in:
+
+```sh
+./tools/normalize-xdk.sh xdk/
+```
+
+Or from inside a project that includes `oxdk.mk`:
+
+```sh
+make normalize-xdk
+```
+
+It's a no-op on case-insensitive filesystems, so it's safe to run on macOS too.
+
+### 5. Verify
 
 ```sh
 cd examples/hello
@@ -151,6 +168,30 @@ cxbe from NXDK handles PE-to-XBE conversion. During testing we made two tweaks f
 - All XBE sections are marked executable
 - Library version entries are read from the PE's `.XBLD` section instead of using a placeholder
 
+## Asset Tools
+
+### `tools/xbx/xbx_convert.py` — XPR0 texture converter
+
+Bidirectional converter between Xbox XPR0 (`.xbx`) textures and standard image formats. Useful for extracting assets from an existing title or producing new ones from PNGs.
+
+```sh
+# Decode an .xbx texture to PNG
+./tools/xbx/xbx_convert.py decode input.xbx output.png
+
+# Encode a PNG to .xbx (DXT1, lossy compressed — default)
+./tools/xbx/xbx_convert.py encode input.png output.xbx
+
+# Encode as uncompressed ARGB8888 (larger, lossless)
+./tools/xbx/xbx_convert.py encode input.png output.xbx --format argb8888
+
+# Print header info (dimensions, format, sizes)
+./tools/xbx/xbx_convert.py info input.xbx
+```
+
+Decode supports DXT1/3/5, A8R8G8B8, X8R8G8B8, R5G6B5, A1R5G5B5, X1R5G5B5, A4R4G4B4, L8, AL8, P8, and their `LIN_*` (non-swizzled) variants. Encode supports DXT1 and ARGB8888. Handles both swizzled (Morton / Z-order) and linear layouts with NV2A 64-byte pitch alignment.
+
+Requires Python 3 and Pillow.
+
 ## Limitations
 
 - **Modded consoles only.** XBE section digests and the digital signature are zeroed out. Stock retail consoles will reject them. TSOP, modchip, and Cerbios all work fine.
@@ -170,6 +211,8 @@ OXDK/
     hello/             minimal D3D test app (definitely not a dolphin)
   tools/
     cxbe/              PE-to-XBE converter from NXDK, tweaked for XDK binaries
+    xbx/               Xbox XPR0 (.xbx) texture <-> PNG converter
+    normalize-xdk.sh   lowercase XDK filenames for case-sensitive filesystems
   xdk/
     lib/               drop your XDK .lib files here
     include/           drop your XDK headers here

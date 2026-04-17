@@ -81,10 +81,13 @@ OXDK_LIBS ?= libcmtd.lib libcpmtd.lib xboxkrnl.lib \
 # Build rules
 OBJS = $(addprefix $(OUTPUT_DIR)/,$(SRCS:.cpp=.obj))
 
-.PHONY: all clean
+.PHONY: all clean normalize-xdk
 
 all: $(OUTPUT_DIR)/default.xbe
 	@echo "=== Build complete: $< ==="
+
+normalize-xdk:
+	$(OXDK_DIR)/tools/normalize-xdk.sh $(XDK_DIR)
 
 $(OUTPUT_DIR)/default.xbe: $(OUTPUT_DIR)/$(XBE_TITLE).exe $(CXBE)
 	$(CXBE) -MODE:$(XBE_MODE) -TITLE:"$(XBE_TITLE)" -OUT:$@ $<
