@@ -59,16 +59,22 @@ else
 fi
 
 # The tools that get run by hand rather than by make.
+#
+# The patched LLVM goes on PATH only for the Xbox 360. It is built for PowerPC
+# alone, so putting it first in an Xbox shell would shadow the system clang
+# with one that cannot target x86.
 oxdk_env_path=$OXDK_DIR/scripts
 for oxdk_env_d in \
     "$OXDK_DIR/xbox/tools/cxbe" \
     "$OXDK_DIR/xbox360/tools/cxex" \
     "$OXDK_DIR/xbox360/tools/xbdm" \
-    "$OXDK_DIR/xbox360/tools/xexutil" \
-    "$OXDK_LLVM/bin"
+    "$OXDK_DIR/xbox360/tools/xexutil"
 do
     [ -d "$oxdk_env_d" ] && oxdk_env_path=$oxdk_env_path:$oxdk_env_d
 done
+if [ "$OXDK_TARGET" = xbox360 ] && [ -d "$OXDK_LLVM/bin" ]; then
+    oxdk_env_path=$oxdk_env_path:$OXDK_LLVM/bin
+fi
 case ":$PATH:" in
     *":$OXDK_DIR/scripts:"*) : ;;
     *) PATH=$oxdk_env_path:$PATH; export PATH ;;

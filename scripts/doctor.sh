@@ -13,7 +13,7 @@ ask() {
 OXDK_DIR := $ROOT
 include $ROOT/common/toolchain.mk
 all:
-	@echo "\$($1)"
+	@echo "$1"
 MK
 }
 
@@ -24,7 +24,7 @@ say "system" "$(uname -s) $(uname -m)"
 echo
 echo "Compiler"
 
-OXDK_LLVM=$(ask OXDK_LLVM)
+OXDK_LLVM=$(ask "\$(OXDK_LLVM)")
 if [ -n "$OXDK_LLVM" ]; then
     say "patched LLVM" "$OXDK_LLVM"
 else
@@ -32,7 +32,7 @@ else
 fi
 
 for t in LLD_LINK LLD OBJCOPY LLVM_AR LLVM_NM; do
-    v=$(ask $t)
+    v=$(ask "\$($t)")
     case "$v" in
         /*) say "$(echo $t | tr 'A-Z_' 'a-z-')" "$v" ;;
         *)  found=$(command -v "$v" 2>/dev/null)
@@ -40,16 +40,22 @@ for t in LLD_LINK LLD OBJCOPY LLVM_AR LLVM_NM; do
     esac
 done
 
-libcxx=$(ask OXDK_LIBCXX_DIR)
+libcxx=$(ask "\$(OXDK_LIBCXX_DIR)")
 say "libc++ headers" "${libcxx:-not found}"
 
 echo
 echo "Xbox"
-xclang=$(command -v clang 2>/dev/null)
+xclang=$(ask "\$(call oxdk-tool,clang)")
+case "$xclang" in
+    /*) : ;;
+    *) xclang=$(command -v "$xclang" 2>/dev/null) ;;
+esac
 if [ -n "$xclang" ] && "$xclang" -target i386-pc-windows-msvc -x c -c /dev/null -o /dev/null 2>/dev/null; then
     say "x86 compiler" "$xclang"
+elif [ -n "$xclang" ]; then
+    say "x86 compiler" "$xclang has no x86 backend"
 else
-    say "x86 compiler" "no clang with an x86 backend found"
+    say "x86 compiler" "not found"
 fi
 if [ -f "$ROOT/xbox/xdk/lib/xboxkrnl.lib" ]; then
     say "XDK" "$ROOT/xbox/xdk"
@@ -70,8 +76,16 @@ if [ -n "$OXDK_LLVM" ] && [ -x "$OXDK_LLVM/bin/clang" ]; then
 else
     say "xenon-abi" "no patched clang"
 fi
+# XDK_DIR only counts if it looks like a 360 XDK. In an Xbox shell it points at
+# the other console's, so fall back to the search either way.
+xdk360=""
 if [ -n "$XDK_DIR" ] && [ -f "$XDK_DIR/lib/xbox/xboxkrnl.lib" ]; then
-    say "XDK" "$XDK_DIR"
+    xdk360=$XDK_DIR
+else
+    xdk360=$(ask "\$(OXDK_XBOX360_XDK)")
+fi
+if [ -n "$xdk360" ] && [ -f "$xdk360/lib/xbox/xboxkrnl.lib" ]; then
+    say "XDK" "$xdk360"
 else
     say "XDK" "set XDK_DIR to an extracted Xbox 360 XDK"
 fi

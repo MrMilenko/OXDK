@@ -58,11 +58,11 @@ LLVM_NM  ?= $(call oxdk-tool,llvm-nm)
 # whoever built a compiler already has one and it needs no install step. Each
 # console supplies the headers CMake would otherwise have generated.
 ifeq ($(OXDK_LIBCXX_DIR),)
-OXDK_LIBCXX_DIR := $(firstword $(wildcard \
+OXDK_LIBCXX_DIR := $(abspath $(firstword $(wildcard \
     $(OXDK_LLVM)/../libcxx/include \
     $(HOME)/oxdk-llvm/libcxx/include \
     $(HOME)/llvm-xenon/libcxx/include \
-    $(addsuffix /include/c++/v1,$(OXDK_LLVM_DIRS))))
+    $(addsuffix /include/c++/v1,$(OXDK_LLVM_DIRS)))))
 endif
 
 export OXDK_LLVM OXDK_LIBCXX_DIR LLD_LINK LLD OBJCOPY LLVM_AR LLVM_NM
