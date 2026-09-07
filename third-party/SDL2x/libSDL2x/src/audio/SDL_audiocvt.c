@@ -187,6 +187,11 @@ static Sint32 ResamplerPadding(const Sint32 inrate, const Sint32 outrate)
      * by large floating point numbers. Sint32 is needed for the large number
      * multiplication. The integers are assumed to be non-negative so that
      * division rounds by truncation. */
+    /* OXDK: guard against a 0 (or negative) rate -- a sound/stream created with
+       an unset rate would otherwise divide-by-zero here and crash the title. */
+    if (inrate <= 0 || outrate <= 0) {
+        return 0;
+    }
     if (inrate == outrate) {
         return 0;
     }

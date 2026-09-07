@@ -48,6 +48,9 @@ static SDL_bool SupportsIMMDevice = SDL_FALSE;
 #if defined(__XBOX__)
 /* remember the playback buffer so the app can tweak mixbins/volume */
 static LPDIRECTSOUNDBUFFER SDL_Xbox_DSoundBuffer = NULL;
+/* kernel debug print (reaches the XBDM console; SDL_Log does not here) */
+extern void __cdecl DbgPrint(const char* Format, ...);
+#define DSDBG(...) DbgPrint(__VA_ARGS__)
 #endif
 
 #ifndef __XBOX__
@@ -525,41 +528,42 @@ static int CreateSecondary(_THIS, const DWORD bufsize, WAVEFORMATEX* wfmt)
     format.dwBufferBytes = bufsize;
     format.lpwfxFormat = wfmt;
 
+    DSDBG("DSOUND/xbox: CreateSoundBuffer (bytes=%u ch=%u bits=%u rate=%u)...\n",
+          (unsigned)bufsize, (unsigned)wfmt->nChannels, (unsigned)wfmt->wBitsPerSample, (unsigned)wfmt->nSamplesPerSec);
     result = IDirectSound_CreateSoundBuffer(sndObj, &format, sndbuf, NULL);
     if (result != DS_OK) {
         return SetDSerror("DirectSound CreateSoundBuffer", result);
     }
+    DSDBG("DSOUND/xbox: CreateSoundBuffer OK; SetFormat...\n");
 
     IDirectSoundBuffer_SetFormat(*sndbuf, wfmt);
+    DSDBG("DSOUND/xbox: SetFormat OK\n");
 
 #if defined(_XBOX) || defined(__XBOX__)
     /* remember this buffer so the app can control it later */
     SDL_Xbox_DSoundBuffer = *sndbuf;
 
-    /* default Xbox routing: push to common mixbins at full volume */
+    /* OXDK fix: the original code routed to SIX mixbins (5.1) on a 2-channel
+       buffer -- a voice/channel mismatch that trips the MCPX assert. Route the
+       stereo buffer to exactly TWO mixbins (front L/R) so the count matches the
+       channels: no crash, and actual audible output. */
     {
-        DSMIXBINVOLUMEPAIR bins[] = {
-            { DSMIXBIN_FRONT_LEFT,     DSBVOLUME_MAX },
-            { DSMIXBIN_FRONT_RIGHT,    DSBVOLUME_MAX },
-            { DSMIXBIN_FRONT_CENTER,   DSBVOLUME_MAX },
-            { DSMIXBIN_BACK_LEFT,      DSBVOLUME_MAX },
-            { DSMIXBIN_BACK_RIGHT,     DSBVOLUME_MAX },
-            { DSMIXBIN_LOW_FREQUENCY,  DSBVOLUME_MAX },
+        DSMIXBINVOLUMEPAIR bins[2] = {
+            { DSMIXBIN_FRONT_LEFT,  DSBVOLUME_MAX },
+            { DSMIXBIN_FRONT_RIGHT, DSBVOLUME_MAX },
         };
         DSMIXBINS mb;
-        mb.dwMixBinCount = sizeof(bins) / sizeof(bins[0]);
+        mb.dwMixBinCount = 2;
         mb.lpMixBinVolumePairs = bins;
-
-        /* use the Xbox 2D default headroom instead of 'as loud as possible' */
-        IDirectSoundBuffer_SetHeadroom(*sndbuf, DSBHEADROOM_DEFAULT_2D);   /* 600 mB */
+        DSDBG("DSOUND/xbox: SetMixBins(2: front L/R)...\n");
         IDirectSoundBuffer_SetMixBins(*sndbuf, &mb);
-
-        /* Can be changed */
-        IDirectSoundBuffer_SetVolume(*sndbuf, 0);
+        IDirectSoundBuffer_SetVolume(*sndbuf, 0); /* 0 = full volume */
+        DSDBG("DSOUND/xbox: SetMixBins/SetVolume OK\n");
     }
 #endif
 
     /* silence initial buffer */
+    DSDBG("DSOUND/xbox: locking entire buffer to silence it...\n");
     result = IDirectSoundBuffer_Lock(*sndbuf, 0, format.dwBufferBytes,
         (LPVOID*)&pvAudioPtr1, &dwAudioBytes1,
         (LPVOID*)&pvAudioPtr2, &dwAudioBytes2,
@@ -569,8 +573,12 @@ static int CreateSecondary(_THIS, const DWORD bufsize, WAVEFORMATEX* wfmt)
         IDirectSoundBuffer_Unlock(*sndbuf,
             pvAudioPtr1, dwAudioBytes1,
             pvAudioPtr2, dwAudioBytes2);
+        DSDBG("DSOUND/xbox: silence lock/unlock OK\n");
+    } else {
+        DSDBG("DSOUND/xbox: silence Lock failed hr=0x%08x\n", (unsigned)result);
     }
 
+    DSDBG("DSOUND/xbox: CreateSecondary DONE\n");
     return 0;
 }
 
@@ -650,10 +658,12 @@ static int DSOUND_OpenDevice(_THIS, const char* devname)
         }
 #else
         /* OG Xbox: create device now */
+        DSDBG("DSOUND/xbox: OpenDevice -> DirectSoundCreate...\n");
         result = DirectSoundCreate(NULL, &this->hidden->sound, NULL);
         if (result != DS_OK) {
             return SetDSerror("DirectSoundCreate (Xbox)", result);
         }
+        DSDBG("DSOUND/xbox: DirectSoundCreate OK (sound=%p)\n", (void*)this->hidden->sound);
         /* no cooperative level on Xbox */
 #endif
     }

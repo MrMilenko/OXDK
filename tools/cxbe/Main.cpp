@@ -21,8 +21,11 @@ int main(int argc, char *argv[])
     char szXbeTitle[OPTION_LEN + 1] = "Untitled";
     char szMode[OPTION_LEN + 1] = "retail";
     char szLogo[OPTION_LEN + 1] = "";
+    char szTitleImage[OPTION_LEN + 1] = "";
     char szDebugPath[OPTION_LEN + 1] = "";
+    char szLimit64MB[OPTION_LEN + 1] = "yes";
     bool bRetail;
+    bool bLimit64MB;
 
     const char *program = argv[0];
     const char *program_desc = "CXBE EXE to XBE (win32 to Xbox) Relinker (Version: " VERSION ")";
@@ -30,7 +33,9 @@ int main(int argc, char *argv[])
         { szExeFilename, NULL, "exefile" },         { szXbeFilename, "OUT", "filename" },
         { szDumpFilename, "DUMPINFO", "filename" }, { szXbeTitle, "TITLE", "title" },
         { szMode, "MODE", "{debug|retail}" },       { szLogo, "LOGO", "filename" },
-        { szDebugPath, "DEBUGPATH", "path" },       { NULL }
+        { szTitleImage, "TITLEIMAGE", "filename" }, { szDebugPath, "DEBUGPATH", "path" },
+        { szLimit64MB, "LIMIT64MB", "{yes|no}" },
+        { NULL }
     };
 
     if(ParseOptions(argv, argc, options, szErrorMessage))
@@ -45,6 +50,16 @@ int main(int argc, char *argv[])
     else
     {
         strncpy(szErrorMessage, "invalid MODE", ERROR_LEN);
+        goto cleanup;
+    }
+
+    if(CompareString(szLimit64MB, "YES"))
+        bLimit64MB = true;
+    else if(CompareString(szLimit64MB, "NO"))
+        bLimit64MB = false;
+    else
+    {
+        strncpy(szErrorMessage, "invalid LIMIT64MB", ERROR_LEN);
         goto cleanup;
     }
 
@@ -90,7 +105,38 @@ int main(int argc, char *argv[])
             LogoPtr = &logo;
         }
 
-        Xbe *XbeFile = new Xbe(ExeFile, szXbeTitle, bRetail, LogoPtr, szDebugPath);
+        // Optional dashboard title image: the raw bytes of a $$XTIMAGE XPR (the
+        // same format as a TitleImage.xbx) get embedded as a $$XTIMAGE section so
+        // the XBE carries its icon like a retail title.
+        std::vector<uint08> titleImage;
+        std::vector<uint08> *TitleImagePtr = nullptr;
+        if(szTitleImage[0] != '\0')
+        {
+            FILE *ti = fopen(szTitleImage, "rb");
+            if(ti == NULL)
+            {
+                strncpy(szErrorMessage, "Unable to open TITLEIMAGE file", ERROR_LEN);
+                goto cleanup;
+            }
+            fseek(ti, 0, SEEK_END);
+            long tiSize = ftell(ti);
+            fseek(ti, 0, SEEK_SET);
+            if(tiSize > 0)
+            {
+                titleImage.resize((size_t)tiSize);
+                if(fread(&titleImage[0], 1, (size_t)tiSize, ti) == (size_t)tiSize)
+                    TitleImagePtr = &titleImage;
+            }
+            fclose(ti);
+            if(TitleImagePtr == nullptr)
+            {
+                strncpy(szErrorMessage, "Unable to read TITLEIMAGE file", ERROR_LEN);
+                goto cleanup;
+            }
+        }
+
+        Xbe *XbeFile =
+            new Xbe(ExeFile, szXbeTitle, bRetail, LogoPtr, szDebugPath, TitleImagePtr, bLimit64MB);
 
         if(XbeFile->GetError() != 0)
         {

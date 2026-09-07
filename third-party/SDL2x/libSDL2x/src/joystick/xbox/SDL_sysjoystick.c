@@ -303,7 +303,10 @@ XBOX_JoystickOpen(SDL_Joystick* joystick, int device_index)
 	joystick->nbuttons = 10;
 	joystick->nhats = 1; // for D-Pad
 
-	joystick->hwdata = &g_Controllers[foundPort];
+	/* OXDK-patch: the Xbox driver stores its own XboxControllerDevice in
+	 * joystick->hwdata (declared struct joystick_hwdata*). Explicit cast for
+	 * clang 19+/22 which promotes -Wincompatible-pointer-types to an error. */
+	joystick->hwdata = (struct joystick_hwdata *)&g_Controllers[foundPort];
 
 	SDL_Log("Joystick opened successfully for port %d\n", foundPort);
 

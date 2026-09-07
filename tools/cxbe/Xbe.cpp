@@ -33,7 +33,7 @@ static size_t BasenameOffset(const std::string &path)
 
 // construct via Exe file object
 Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vector<uint08> *logo,
-         const char *x_szDebugPath)
+         const char *x_szDebugPath, const std::vector<uint08> *x_TitleImage, bool x_bLimit64MB)
 {
     ConstructorInit();
 
@@ -43,6 +43,13 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
 
     printf("Xbe::Xbe: Pass 1 (Simple Pass)...");
     std::string debug_path = x_szDebugPath;
+
+    // Optional synthetic $$XTIMAGE section (the dashboard title image) appended
+    // after the PE-derived sections. exeSections counts the real sections; the
+    // title image, when present, is the last section.
+    const uint32 exeSections = x_Exe->m_Header.m_sections;
+    const bool hasTitleImage = (x_TitleImage != nullptr && !x_TitleImage->empty());
+    static const char *const kTitleImageName = "$$XTIMAGE";
 
     // pass 1
     {
@@ -58,14 +65,17 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
         // this is a constant value
         m_Header.dwSizeofImageHeader = sizeof(m_Header);
 
-        // we'll have the same number of sections as the Exe
-        m_Header.dwSections = x_Exe->m_Header.m_sections;
+        // one XBE section per Exe section, plus the title image section if given
+        m_Header.dwSections = exeSections + (hasTitleImage ? 1 : 0);
 
         // TODO: allow configuration
         {
             memset(&m_Header.dwInitFlags, 0, sizeof(m_Header.dwInitFlags));
 
-            m_Header.dwInitFlags.bLimit64MB = true;
+            // Clearing bLimit64MB lets the title see all 128 MB on an upgraded
+            // console or a devkit. Retail hardware has 64 MB either way, so the
+            // flag only matters where the extra memory actually exists.
+            m_Header.dwInitFlags.bLimit64MB = x_bLimit64MB;
             m_Header.dwInitFlags.bDontSetupHarddisk = false;
             m_Header.dwInitFlags.bMountUtilityDrive = true;
         }
@@ -141,6 +151,12 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
             // make room for section names
             for(uint32 v = 0; v < m_Header.dwSections; v++)
             {
+                if(hasTitleImage && v == exeSections)
+                {
+                    mrc += strlen(kTitleImageName) + 1;
+                    continue;
+                }
+
                 uint32 s = 0;
 
                 while(s < 8 && x_Exe->m_SectionHeader[v].m_name[s] != '\0')
@@ -363,7 +379,7 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
 
         // write section headers / section names
         {
-            m_szSectionName = new char[m_Header.dwSections][9];
+            m_szSectionName = new char[m_Header.dwSections][16];
 
             m_SectionHeader = new SectionHeader[m_Header.dwSections];
 
@@ -386,6 +402,52 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
             for(uint32 v = 0; v < m_Header.dwSections; v++)
             {
                 printf("Xbe::Xbe: Generating Section Header %.04X...", v);
+
+                // Synthetic $$XTIMAGE section: a plain data section (no preload,
+                // not executable) carrying the dashboard title image, appended in
+                // virtual space after the last PE section. Self contained so it
+                // skips the PE-driven logic below.
+                if(hasTitleImage && v == exeSections)
+                {
+                    uint32 tiSize = (uint32)x_TitleImage->size();
+
+                    memset(&m_SectionHeader[v].dwFlags, 0, sizeof(m_SectionHeader->dwFlags));
+                    m_SectionHeader[v].dwVirtualAddr =
+                        RoundUp(m_SectionHeader[v - 1].dwVirtualAddr +
+                                    m_SectionHeader[v - 1].dwVirtualSize,
+                                0x1000);
+                    m_SectionHeader[v].dwRawAddr = SectionCursor;
+                    m_SectionHeader[v].dwSizeofRaw = RoundUp(tiSize, 4);
+                    m_SectionHeader[v].dwVirtualSize = m_SectionHeader[v].dwSizeofRaw;
+
+                    SectionCursor += RoundUp(m_SectionHeader[v].dwSizeofRaw, 0x1000);
+
+                    // head/tail reference count
+                    m_SectionHeader[v].dwHeadSharedRefCountAddr = hwc_htrc;
+                    htrc[v] = 0;
+                    hwc_htrc += 2;
+                    m_SectionHeader[v].dwTailSharedRefCountAddr = hwc_htrc;
+                    htrc[v + 1] = 0;
+
+                    // section name ($$XTIMAGE, longer than the 8 char PE limit)
+                    uint32 nameLen = (uint32)strlen(kTitleImageName);
+                    memset(secn, 0, nameLen + 1);
+                    m_SectionHeader[v].dwSectionNameAddr = hwc_secn;
+                    memcpy(secn, kTitleImageName, nameLen);
+                    memcpy(m_szSectionName[v], kTitleImageName, nameLen);
+                    m_szSectionName[v][nameLen] = '\0';
+                    secn += nameLen + 1;
+                    hwc_secn += nameLen + 1;
+
+                    m_SectionHeader[v].dwSectionRefCount = 0;
+                    memset(m_SectionHeader[v].bzSectionDigest, 0, 20);
+
+                    memcpy(szBuffer, &m_SectionHeader[v], sizeof(*m_SectionHeader));
+                    szBuffer += sizeof(*m_SectionHeader);
+
+                    printf("OK ($$XTIMAGE)\n");
+                    continue;
+                }
 
                 uint32 characteristics = x_Exe->m_SectionHeader[v].m_characteristics;
 
@@ -418,8 +480,9 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
                     m_SectionHeader[v].dwSizeofRaw = RoundUp(r + 2, 4);
                 }
 
-                // calculate virtual size
-                if(v < m_Header.dwSections - 1)
+                // calculate virtual size (compare against the PE section count,
+                // since the synthetic title image section has no Exe entry)
+                if(v < exeSections - 1)
                     m_SectionHeader[v].dwVirtualSize =
                         x_Exe->m_SectionHeader[v + 1].m_virtual_addr -
                         x_Exe->m_SectionHeader[v].m_virtual_addr;
@@ -601,7 +664,16 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
 
                 memset(m_bzSection[v], 0, maxSize);
 
-                memcpy(m_bzSection[v], x_Exe->m_bzSection[v], RawSize);
+                if(hasTitleImage && v == exeSections)
+                {
+                    // copy the title image bytes (its raw size is rounded up, so
+                    // copy only what we have and leave the padding zeroed)
+                    memcpy(m_bzSection[v], &(*x_TitleImage)[0], x_TitleImage->size());
+                }
+                else
+                {
+                    memcpy(m_bzSection[v], x_Exe->m_bzSection[v], RawSize);
+                }
 
                 printf("OK\n");
             }

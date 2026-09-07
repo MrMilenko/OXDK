@@ -27,7 +27,8 @@ class Xbe : public Error
   public:
     // construct via Exe file object
     Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail,
-        const std::vector<uint08> *logo = nullptr, const char *x_szDebugPath = nullptr);
+        const std::vector<uint08> *logo = nullptr, const char *x_szDebugPath = nullptr,
+        const std::vector<uint08> *x_TitleImage = nullptr, bool x_bLimit64MB = true);
 
     // deconstructor
     ~Xbe();
@@ -170,8 +171,9 @@ class Xbe : public Error
         uint32 dwCharacteristics; // characteristics
     } __attribute((packed)) * m_TLS;
 
-    // Xbe section names, each 8 bytes max and null terminated
-    char (*m_szSectionName)[9];
+    // Xbe section names, null terminated. 8 bytes max for PE-derived sections,
+    // but synthetic sections (e.g. $$XTIMAGE) can be longer, so allow 15 + null.
+    char (*m_szSectionName)[16];
 
     // Xbe sections
     uint08 **m_bzSection;

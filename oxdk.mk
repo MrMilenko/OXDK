@@ -7,6 +7,9 @@
 #   SRCS        - list of source files (.c, .cc, .cpp)
 #   XBE_TITLE   - title string for the XBE
 #   XBE_MODE    - DEBUG or RETAIL (default: RETAIL)
+#   XBE_LIMIT64MB - yes or no, default yes. Set to no to let the title use all
+#                 128 MB on an upgraded console or a devkit. Stock hardware has
+#                 64 MB either way, so no is safe there too.
 
 ifeq ($(OXDK_DIR),)
 $(error OXDK_DIR must be set to the OXDK directory)
@@ -35,6 +38,10 @@ ifeq ($(XBE_MODE),)
 XBE_MODE = RETAIL
 endif
 
+ifeq ($(XBE_LIMIT64MB),)
+XBE_LIMIT64MB = yes
+endif
+
 ifeq ($(OUTPUT_DIR),)
 OUTPUT_DIR = bin
 endif
@@ -58,10 +65,16 @@ OXDK_LIBCXX_INC = -nostdinc++ \
 	-isystem $(OXDK_LIBCXX_DIR) \
 	-isystem $(OXDK_DIR)/oxdk/libcxx-cshim \
 	-isystem $(OXDK_CLANG_RES)
-# clang emits the v3 C++ EH personality (__CxxFrameHandler3) but the MSVC 7.1
-# era XDK CRT only ships the v1 handler, and the two unwind ABIs are not
-# compatible. Build libc++ without exceptions; it turns throws into aborts.
-OXDK_LIBCXX_CXX = -fno-exceptions
+# C files also benefit from the cshim (snprintf etc. the XDK CRT lacks).
+OXDK_LIBCXX_C_INC = -isystem $(OXDK_DIR)/oxdk/libcxx-cshim
+# clang emits the v3 C++ EH personality (__CxxFrameHandler3) which the XDK
+# CRT does not ship, and enabling exceptions pulls in std::exception /
+# std::logic_error / std::bad_array_new_length / __std_terminate that need
+# real class bodies (libc++abi territory). Stay with -fno-exceptions for
+# now; consumers that need try/catch will need an exception runtime first.
+# NOMINMAX stops <windows.h> / xtl.h from defining min/max as macros that
+# clobber std::min and std::max.
+OXDK_LIBCXX_CXX = -fno-exceptions -DNOMINMAX
 OXDK_XDK_INC = -isystem $(XDK_DIR)/include
 else
 OXDK_XDK_INC = -I$(XDK_DIR)/include
@@ -82,11 +95,16 @@ OXDK_COMMON_FLAGS = -D_XBOX -D_X86_ -DWIN32_LEAN_AND_MEAN -D_NTOS_ -D_MT \
 	-Xclang -fdefault-calling-conv=stdcall
 
 OXDK_CFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_COMMON_FLAGS) \
-	-I$(OXDK_DIR) $(OXDK_XDK_INC)
+	$(OXDK_LIBCXX_C_INC) -I$(OXDK_DIR) $(OXDK_XDK_INC)
 
-# -fno-rtti: the XDK CRT ships no RTTI. In libc++ mode the libc++ headers go
-# ahead of the XDK include and exceptions are dropped (OXDK_LIBCXX_CXX above).
-OXDK_CXXFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_COMMON_FLAGS) -fno-rtti \
+# RTTI is on: libcmt ships __RTDynamicCast / __RTtypeid / __RTCastToVoid so
+# dynamic_cast and typeid resolve through the MSVC runtime, and libc++'s
+# own type_info out-of-line methods (__compare / ~type_info / name() /
+# hash_code()) are provided in libcxx_runtime.cpp.
+# -fno-threadsafe-statics: C++11 magic statics need __Init_thread_* helpers
+# the XDK CRT doesn't ship; Xbox is single-threaded for static init anyway.
+OXDK_CXXFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_COMMON_FLAGS) \
+	-fno-threadsafe-statics \
 	$(OXDK_LIBCXX_CXX) $(OXDK_LIBCXX_INC) -I$(OXDK_DIR) $(OXDK_XDK_INC)
 
 # Linker flags
@@ -143,7 +161,7 @@ normalize-xdk:
 	$(OXDK_DIR)/tools/normalize-xdk.sh $(XDK_DIR)
 
 $(OUTPUT_DIR)/default.xbe: $(OUTPUT_DIR)/$(XBE_TITLE).exe $(CXBE)
-	$(CXBE) -MODE:$(XBE_MODE) -TITLE:"$(XBE_NAME)" -OUT:$@ $<
+	$(CXBE) -MODE:$(XBE_MODE) -TITLE:"$(XBE_NAME)" -LIMIT64MB:$(XBE_LIMIT64MB) -OUT:$@ $<
 
 $(OUTPUT_DIR)/$(XBE_TITLE).exe: $(OBJS)
 	lld-link $(OXDK_LDFLAGS) $(OXDK_KERNEL_IMPORTS) $(OXDK_CRT_HELPERS) $(LDFLAGS) \
