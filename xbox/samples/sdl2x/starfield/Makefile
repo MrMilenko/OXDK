@@ -1,0 +1,19 @@
+# RXDK-SDL2x starfield sample on OXDK.
+#
+# Source: ../../../third-party/SDL2x/Samples/starfield/Starfield.cpp (pristine upstream).
+
+OXDK_DIR  = ../../../..
+XBE_TITLE = sdl2_starfield
+XBE_MODE  = RETAIL
+
+include $(OXDK_DIR)/xbox/third-party/SDL2x/oxdk/sdl2x.mk
+
+SRCS  = $(SDL2X_ROOT)/Samples/starfield/Starfield.cpp
+SRCS += $(SDL2X_SRC_LIST)
+
+CFLAGS   += $(SDL2X_DEFINES) $(SDL2X_INCLUDES)
+CXXFLAGS += $(SDL2X_DEFINES) $(SDL2X_INCLUDES)
+
+OXDK_LIBS = $(SDL2X_LIBS)
+
+include $(OXDK_DIR)/oxdk.mk

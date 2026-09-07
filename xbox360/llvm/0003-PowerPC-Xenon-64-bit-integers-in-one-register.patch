@@ -1,0 +1,211 @@
+--- a/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
++++ b/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
+@@ -145,9 +145,6 @@
+ // four bytes into the eight byte slot at +40. Aggregates larger than a slot, or whose
+ // size is not a power of two, are left justified instead. That is the rule the XDK's
+ // own vadefs.h states as _VA_IS_LEFT_JUSTIFIED.
+-//
+-// Known gap: a 64 bit integer reaches this hook already split into two i32 pieces, so
+-// it takes two slots where Microsoft's compiler uses one 64 bit register and one slot.
+ static bool CC_PPC32_Xenon(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
+                            CCValAssign::LocInfo &LocInfo,
+                            ISD::ArgFlagsTy &ArgFlags, CCState &State) {
+@@ -167,6 +164,45 @@
+   if (ArgFlags.isVarArg() && LocVT == MVT::f32) {
+     LocVT = MVT::f64;
+     LocInfo = CCValAssign::FPExt;
++  }
++
++  // A 64 bit integer arrives here already split into two i32 halves, because
++  // i64 is not a legal type on a 32 bit subtarget. Microsoft's compiler passes
++  // one in a single 64 bit register and a single slot, so the two halves share
++  // both: the first half takes them and each half gets a custom location naming
++  // the same place. LowerCall writes the halves into the slot and loads the
++  // doubleword back out of it; LowerFormalArguments does the reverse.
++  if (LocVT == MVT::i32 && (ArgFlags.isSplit() || ArgFlags.isSplitEnd())) {
++    if (ArgFlags.isSplit()) {
++      unsigned PairOffset = State.AllocateStack(SlotSize, Align(SlotSize));
++      unsigned PairSlot = (PairOffset - LinkageSize) / SlotSize;
++      MCRegister PairGPR;
++      if (PairSlot < std::size(GPRs))
++        PairGPR = State.AllocateReg(GPRs[PairSlot]);
++      CCValAssign Where =
++          PairGPR ? CCValAssign::getCustomReg(ValNo, ValVT, PairGPR, LocVT,
++                                              LocInfo)
++                  : CCValAssign::getCustomMem(ValNo, ValVT, PairOffset, LocVT,
++                                              LocInfo);
++      State.addLoc(Where);
++      // Remembered for the second half, which has to land in the same place.
++      State.getPendingLocs().push_back(Where);
++      return true;
++    }
++
++    // The second half goes wherever the first one did. Both name the start of
++    // the slot; the halves are placed within it by the lowering.
++    SmallVectorImpl<CCValAssign> &Pending = State.getPendingLocs();
++    assert(!Pending.empty() && "split end without a split start");
++    CCValAssign First = Pending.back();
++    Pending.clear();
++    if (First.isRegLoc())
++      State.addLoc(CCValAssign::getCustomReg(ValNo, ValVT, First.getLocReg(),
++                                             LocVT, LocInfo));
++    else
++      State.addLoc(CCValAssign::getCustomMem(
++          ValNo, ValVT, First.getLocMemOffset(), LocVT, LocInfo));
++    return true;
+   }
+ 
+   unsigned Size = LocVT.getStoreSize();
+--- a/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
++++ b/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
+@@ -4211,6 +4211,59 @@
+ 
+   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
+     CCValAssign &VA = ArgLocs[i];
++
++    // The two halves of a 64 bit integer, which share one slot and one 64 bit
++    // register. The register is homed into its slot and the halves are read
++    // back out of it, because a 32 bit function cannot hold an i64 value to
++    // take apart. This mirrors what LowerCall did to assemble it.
++    if (Subtarget.isXenonABI() && VA.needsCustom() &&
++        VA.getLocVT() == MVT::i32) {
++      assert(i + 1 != e && ArgLocs[i + 1].needsCustom() &&
++             "Xenon 64 bit integer is missing its second half");
++
++      // Big endian, so the first half is the high word.
++      if (VA.isRegLoc()) {
++        int Slot = getXenonArgSlot(VA.getLocReg());
++        assert(Slot >= 0 && "Xenon i64 home is not an argument register");
++        unsigned Offset = LinkageSize + Slot * XenonSlotSize;
++
++        if (!MF.getRegInfo().isLiveIn(XenonArgGPR64s[Slot]))
++          MF.getRegInfo().addLiveIn(XenonArgGPR64s[Slot]);
++
++        // One frame object for the whole slot, and both halves are read out of
++        // it at an offset. Separate objects for the halves would overlap this
++        // one without aliasing it, and the loads would be scheduled ahead of
++        // the store that fills it.
++        int HomeFI = MFI.CreateFixedObject(XenonSlotSize, Offset, false);
++        SDValue HomeAddr = DAG.getFrameIndex(HomeFI, PtrVT);
++        SDValue Ops[] = {
++            Chain, HomeAddr,
++            DAG.getTargetConstant(XenonArgGPR64s[Slot], dl, MVT::i32)};
++        Chain = DAG.getNode(PPCISD::XENON_HOME_STD, dl, MVT::Other, Ops);
++
++        SDValue LoAddr = DAG.getNode(ISD::ADD, dl, PtrVT, HomeAddr,
++                                     DAG.getIntPtrConstant(4, dl));
++        InVals.push_back(
++            DAG.getLoad(MVT::i32, dl, Chain, HomeAddr,
++                        MachinePointerInfo::getFixedStack(MF, HomeFI, 0)));
++        InVals.push_back(
++            DAG.getLoad(MVT::i32, dl, Chain, LoAddr,
++                        MachinePointerInfo::getFixedStack(MF, HomeFI, 4)));
++      } else {
++        // Already in the caller's frame, so there is nothing to home.
++        unsigned Offset = VA.getLocMemOffset();
++        int HiFI = MFI.CreateFixedObject(4, Offset, isImmutable);
++        int LoFI = MFI.CreateFixedObject(4, Offset + 4, isImmutable);
++        InVals.push_back(
++            DAG.getLoad(MVT::i32, dl, Chain, DAG.getFrameIndex(HiFI, PtrVT),
++                        MachinePointerInfo::getFixedStack(MF, HiFI)));
++        InVals.push_back(
++            DAG.getLoad(MVT::i32, dl, Chain, DAG.getFrameIndex(LoFI, PtrVT),
++                        MachinePointerInfo::getFixedStack(MF, LoFI)));
++      }
++      ++i;
++      continue;
++    }
+ 
+     // Arguments stored in registers.
+     if (VA.isRegLoc()) {
+@@ -5104,6 +5157,11 @@
+ 
+   // Variable argument functions are not supported.
+   if (isVarArg)
++    return false;
++
++  // Xenon arguments can need a home slot in the outgoing frame, which is
++  // addressed off the stack pointer and so cannot survive a tail call.
++  if (Subtarget.isXenonABI())
+     return false;
+ 
+   if (CalleeCC == CallingConv::Fast && CallerCC == CalleeCC) {
+@@ -6068,6 +6126,40 @@
+   // A variadic call is never a tail call here (IsEligibleForTailCallOptimization
+   // rejects isVarArg), so addressing the slot off r1 directly is safe.
+   SmallVector<std::pair<MCPhysReg, SDValue>, 4> XenonFPHomes;
++
++  // The same idea for a 64 bit integer, which reaches here as two i32 halves
++  // sharing one slot and one register. Both halves are written into the slot
++  // and the whole doubleword is loaded back, because a 32 bit subtarget has no
++  // way to build a 64 bit register value directly. Part 0 is the high half:
++  // this machine is big endian.
++  auto EmitXenonI64 = [&](const CCValAssign &VA, SDValue Hi, SDValue Lo) {
++    assert(!IsTailCall && "Xenon 64 bit integer must not be a tail call");
++    SDValue PtrVTy = StackPtr;
++    unsigned Offset;
++    int Slot = -1;
++    if (VA.isRegLoc()) {
++      Slot = getXenonArgSlot(VA.getLocReg());
++      assert(Slot >= 0 && "Xenon i64 home is not an argument register");
++      Offset = XenonLinkageSize + Slot * XenonSlotSize;
++    } else {
++      Offset = VA.getLocMemOffset();
++    }
++    SDValue HiAddr =
++        DAG.getNode(ISD::ADD, dl, getPointerTy(MF.getDataLayout()), PtrVTy,
++                    DAG.getIntPtrConstant(Offset, dl));
++    SDValue LoAddr =
++        DAG.getNode(ISD::ADD, dl, getPointerTy(MF.getDataLayout()), PtrVTy,
++                    DAG.getIntPtrConstant(Offset + 4, dl));
++    MemOpChains.push_back(
++        DAG.getStore(Chain, dl, Hi, HiAddr, MachinePointerInfo()));
++    MemOpChains.push_back(
++        DAG.getStore(Chain, dl, Lo, LoAddr, MachinePointerInfo()));
++    if (Slot >= 0) {
++      XenonFPHomes.push_back(std::make_pair(XenonArgGPR64s[Slot], HiAddr));
++      RegsToPass.push_back(std::make_pair(XenonArgGPR64s[Slot], SDValue()));
++    }
++  };
++
+   auto EmitXenonFPHome = [&](const CCValAssign &GPRVA, SDValue Val) {
+     assert(!IsTailCall && "Xenon variadic call must not be a tail call");
+     int Slot = getXenonArgSlot(GPRVA.getLocReg());
+@@ -6147,7 +6239,16 @@
+         Arg = DAG.getNode(ISD::FP_EXTEND, dl, VA.getLocVT(), Arg);
+ 
+       // Put argument in a physical register.
+-      if (Subtarget.isXenonABI() && VA.needsCustom()) {
++      if (Subtarget.isXenonABI() && VA.needsCustom() &&
++          VA.getLocVT() == MVT::i32) {
++        // The two halves of a 64 bit integer, which share this location.
++        assert(i + 1 != e && ArgLocs[i + 1].needsCustom() &&
++               "Xenon 64 bit integer is missing its second half");
++        EmitXenonI64(VA, Arg, OutVals[RealArgIdx + 1]);
++        ++i;
++        ++RealArgIdx;
++        continue;
++      } else if (Subtarget.isXenonABI() && VA.needsCustom()) {
+         // Only location for this value: every floating point register was taken.
+         EmitXenonFPHome(VA, Arg);
+       } else if (Subtarget.hasSPE() && Arg.getValueType() == MVT::f64) {
+@@ -6172,6 +6273,19 @@
+       assert(VA.isMemLoc());
+       unsigned LocMemOffset = VA.getLocMemOffset();
+ 
++      // Past the eighth slot a 64 bit integer has no register, but its two
++      // halves still share one slot, so they are placed within it rather than
++      // written one on top of the other.
++      if (Subtarget.isXenonABI() && VA.needsCustom() &&
++          VA.getLocVT() == MVT::i32) {
++        assert(i + 1 != e && ArgLocs[i + 1].needsCustom() &&
++               "Xenon 64 bit integer is missing its second half");
++        EmitXenonI64(VA, Arg, OutVals[RealArgIdx + 1]);
++        ++i;
++        ++RealArgIdx;
++        continue;
++      }
++
+       if (!IsTailCall) {
+         SDValue PtrOff = DAG.getIntPtrConstant(LocMemOffset, dl);
+         PtrOff = DAG.getNode(ISD::ADD, dl, getPointerTy(MF.getDataLayout()),

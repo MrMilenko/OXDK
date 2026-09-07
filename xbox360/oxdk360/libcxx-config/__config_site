@@ -1,0 +1,56 @@
+//===----------------------------------------------------------------------===//
+// OXDK360 __config_site for the Xenon target, ported from OXDK's.
+//
+// Localization off is the point of this file. Microsoft's C++ library cannot be linked
+// from clang-compiled headers -- every out-of-line entity is declared here with Itanium
+// mangling and defined in libcpMT with MSVC's, so they never meet -- and its locale
+// machinery (std::locale::_Init, _Locinfo_ctor, _Lockit) is where that becomes fatal
+// rather than merely awkward. libc++ without localization sidesteps the whole thing.
+//
+// Searched ahead of the upstream libc++ headers so it wins for <__config_site>.
+// Threads/filesystem/localization/wide-chars are off: the Xbox 360 build is
+// single-threaded, uses XDK file APIs, and avoids the iostream/locale runtime.
+//===----------------------------------------------------------------------===//
+
+#ifndef _LIBCPP___CONFIG_SITE
+#define _LIBCPP___CONFIG_SITE
+
+#define _LIBCPP_ABI_VERSION 1
+#define _LIBCPP_ABI_NAMESPACE __1
+#define _LIBCPP_ABI_FORCE_ITANIUM 0
+#define _LIBCPP_ABI_FORCE_MICROSOFT 0
+
+// No thread backend. libc++'s Win32 one is written against fiber-local storage
+// (fibersapi.h, FlsAlloc), which the console has no header for, and nothing in a
+// title needs std::thread or std::mutex: code that wants threads calls CreateThread
+// through the XDK directly. Off, libc++ uses non-atomic refcounts and no locks.
+#define _LIBCPP_HAS_THREADS 0
+#define _LIBCPP_HAS_MONOTONIC_CLOCK 0
+#define _LIBCPP_HAS_TERMINAL 0
+#define _LIBCPP_HAS_MUSL_LIBC 0
+#define _LIBCPP_HAS_THREAD_API_PTHREAD 0
+#define _LIBCPP_HAS_THREAD_API_EXTERNAL 0
+#define _LIBCPP_HAS_THREAD_API_WIN32 0
+#define _LIBCPP_HAS_THREAD_API_C11 0
+
+#define _LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS
+#define _LIBCPP_HAS_VENDOR_AVAILABILITY_ANNOTATIONS 0
+#define _LIBCPP_NO_VCRUNTIME
+
+#define _LIBCPP_HAS_FILESYSTEM 1
+#define _LIBCPP_HAS_RANDOM_DEVICE 0
+#define _LIBCPP_HAS_LOCALIZATION 1
+#define _LIBCPP_HAS_UNICODE 1
+#define _LIBCPP_HAS_WIDE_CHARACTERS 1
+#define _LIBCPP_HAS_TIME_ZONE_DATABASE 0
+#define _LIBCPP_INSTRUMENTED_WITH_ASAN 0
+
+#define _LIBCPP_PSTL_BACKEND_SERIAL
+
+#define _LIBCPP_HARDENING_MODE_DEFAULT (1 << 1)
+#define _LIBCPP_ASSERTION_SEMANTIC_DEFAULT (1 << 2)
+
+#define _LIBCPP_LIBC_PICOLIBC 0
+#define _LIBCPP_LIBC_NEWLIB 0
+
+#endif // _LIBCPP___CONFIG_SITE

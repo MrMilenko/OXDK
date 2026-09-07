@@ -1,0 +1,15 @@
+.DS_Store
+
+# Build output
+*.o
+*.o.tmp
+*.a
+*.elf
+*.bin
+*.xex
+*.pe
+*.image
+.oxdklink/
+
+tools/cxex/cxex
+oxdk360/libcxx-lib/build/

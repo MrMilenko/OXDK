@@ -1,0 +1,479 @@
+diff --git a/clang/lib/Basic/Targets/PPC.cpp b/clang/lib/Basic/Targets/PPC.cpp
+index a6e1ad105..73153ed6f 100644
+--- a/clang/lib/Basic/Targets/PPC.cpp
++++ b/clang/lib/Basic/Targets/PPC.cpp
+@@ -74,6 +74,8 @@ bool PPCTargetInfo::handleTargetFeatures(std::vector<std::string> &Features,
+       FloatABI = SoftFloat;
+     } else if (Feature == "+mma") {
+       HasMMA = true;
++    } else if (Feature == "+xenon-abi") {
++      HasXenonABI = true;
+     } else if (Feature == "+rop-protect") {
+       HasROPProtect = true;
+     } else if (Feature == "+quadword-atomics") {
+@@ -609,6 +611,7 @@ bool PPCTargetInfo::hasFeature(StringRef Feature) const {
+       .Case("spe", HasSPE)
+       .Case("mma", HasMMA)
+       .Case("rop-protect", HasROPProtect)
++      .Case("xenon-abi", HasXenonABI)
+       .Case("quadword-atomics", HasQuadwordAtomics)
+       .Case("longcall", UseLongCalls)
+       .Default(false);
+diff --git a/clang/lib/Basic/Targets/PPC.h b/clang/lib/Basic/Targets/PPC.h
+index 664c9e15d..ebd5ff774 100644
+--- a/clang/lib/Basic/Targets/PPC.h
++++ b/clang/lib/Basic/Targets/PPC.h
+@@ -60,6 +60,7 @@ class LLVM_LIBRARY_VISIBILITY PPCTargetInfo : public TargetInfo {
+   bool HasAltivec = false;
+   bool HasMMA = false;
+   bool HasROPProtect = false;
++  bool HasXenonABI = false;
+   bool HasVSX = false;
+   bool HasP8Vector = false;
+   bool HasP8Crypto = false;
+@@ -194,6 +195,9 @@ public:
+ 
+   bool hasFeature(StringRef Feature) const override;
+ 
++  /// The Xbox 360 convention, which also changes the shape of va_list.
++  bool isXenonABI() const { return HasXenonABI; }
++
+   void setFeatureEnabled(llvm::StringMap<bool> &Features, StringRef Name,
+                          bool Enabled) const override;
+ 
+@@ -421,6 +425,11 @@ public:
+   }
+ 
+   BuiltinVaListKind getBuiltinVaListKind() const override {
++    // The Xbox 360 va_list is a plain pointer walking the caller's parameter save
++    // area, which is what the XDK's vadefs.h declares and what wsprintfA in the XDK
++    // builds. The ELF definition below is a four field struct and cannot express it.
++    if (isXenonABI())
++      return TargetInfo::CharPtrBuiltinVaList;
+     // This is the ELF definition
+     return TargetInfo::PowerABIBuiltinVaList;
+   }
+diff --git a/clang/lib/CodeGen/Targets/PPC.cpp b/clang/lib/CodeGen/Targets/PPC.cpp
+index 35e765564..de5a4d21d 100644
+--- a/clang/lib/CodeGen/Targets/PPC.cpp
++++ b/clang/lib/CodeGen/Targets/PPC.cpp
+@@ -330,14 +330,16 @@ namespace {
+ class PPC32_SVR4_ABIInfo : public DefaultABIInfo {
+   bool IsSoftFloatABI;
+   bool IsRetSmallStructInRegABI;
++  bool IsXenonABI;
+ 
+   CharUnits getParamTypeAlignment(QualType Ty) const;
+ 
+ public:
+   PPC32_SVR4_ABIInfo(CodeGen::CodeGenTypes &CGT, bool SoftFloatABI,
+-                     bool RetSmallStructInRegABI)
++                     bool RetSmallStructInRegABI, bool XenonABI = false)
+       : DefaultABIInfo(CGT), IsSoftFloatABI(SoftFloatABI),
+-        IsRetSmallStructInRegABI(RetSmallStructInRegABI) {}
++        IsRetSmallStructInRegABI(RetSmallStructInRegABI),
++        IsXenonABI(XenonABI) {}
+ 
+   ABIArgInfo classifyReturnType(QualType RetTy) const;
+ 
+@@ -355,9 +357,9 @@ public:
+ class PPC32TargetCodeGenInfo : public TargetCodeGenInfo {
+ public:
+   PPC32TargetCodeGenInfo(CodeGenTypes &CGT, bool SoftFloatABI,
+-                         bool RetSmallStructInRegABI)
++                         bool RetSmallStructInRegABI, bool XenonABI = false)
+       : TargetCodeGenInfo(std::make_unique<PPC32_SVR4_ABIInfo>(
+-            CGT, SoftFloatABI, RetSmallStructInRegABI)) {}
++            CGT, SoftFloatABI, RetSmallStructInRegABI, XenonABI)) {}
+ 
+   static bool isStructReturnInRegABI(const llvm::Triple &Triple,
+                                      const CodeGenOptions &Opts);
+@@ -428,6 +430,19 @@ ABIArgInfo PPC32_SVR4_ABIInfo::classifyReturnType(QualType RetTy) const {
+ // DefaultABIInfo::EmitVAArg.
+ RValue PPC32_SVR4_ABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAList,
+                                      QualType Ty, AggValueSlot Slot) const {
++  // The Xbox 360 va_list is a single pointer walking the caller's parameter save
++  // area in eight byte steps, with a scalar at the end of its slot and an aggregate
++  // at the start. That is the rule the XDK's vadefs.h spells out as _VA_ALIGN and
++  // _VA_IS_LEFT_JUSTIFIED, and it is what the helper already does for a big endian
++  // target given the right slot size.
++  if (IsXenonABI) {
++    auto TI = getContext().getTypeInfoInChars(Ty);
++    return emitVoidPtrVAArg(CGF, VAList, Ty,
++                            classifyArgumentType(Ty).isIndirect(), TI,
++                            CharUnits::fromQuantity(8),
++                            /*AllowHigherAlign=*/false, Slot);
++  }
++
+   if (getTarget().getTriple().isOSDarwin()) {
+     auto TI = getContext().getTypeInfoInChars(Ty);
+     TI.Align = getParamTypeAlignment(Ty);
+@@ -1044,8 +1059,10 @@ std::unique_ptr<TargetCodeGenInfo>
+ CodeGen::createPPC32TargetCodeGenInfo(CodeGenModule &CGM, bool SoftFloatABI) {
+   bool RetSmallStructInRegABI = PPC32TargetCodeGenInfo::isStructReturnInRegABI(
+       CGM.getTriple(), CGM.getCodeGenOpts());
++  bool XenonABI = CGM.getTarget().hasFeature("xenon-abi");
+   return std::make_unique<PPC32TargetCodeGenInfo>(CGM.getTypes(), SoftFloatABI,
+-                                                  RetSmallStructInRegABI);
++                                                  RetSmallStructInRegABI,
++                                                  XenonABI);
+ }
+ 
+ std::unique_ptr<TargetCodeGenInfo>
+diff --git a/llvm/lib/Target/PowerPC/PPC.td b/llvm/lib/Target/PowerPC/PPC.td
+index dc00aebe3..0b5ab7740 100644
+--- a/llvm/lib/Target/PowerPC/PPC.td
++++ b/llvm/lib/Target/PowerPC/PPC.td
+@@ -87,6 +87,11 @@ def FeatureFPU       : SubtargetFeature<"fpu","HasFPU","true",
+ def FeatureAltivec   : SubtargetFeature<"altivec","HasAltivec", "true",
+                                         "Enable Altivec instructions",
+                                         [FeatureFPU]>;
++def FeatureXenonABI  : SubtargetFeature<"xenon-abi", "HasXenonABI", "true",
++                                        "Use the Xbox 360 (Xenon) calling convention: "
++                                        "16 byte linkage area, parameter save area at "
++                                        "caller_sp+16 in 8 byte slots, and the return "
++                                        "address spilled at caller_sp-8">;
+ def FeatureSPE       : SubtargetFeature<"spe","HasSPE", "true",
+                                         "Enable SPE instructions",
+                                         [FeatureHardFloat]>;
+diff --git a/llvm/lib/Target/PowerPC/PPCCallingConv.cpp b/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
+index 332b5e07d..ee4e47c3b 100644
+--- a/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
++++ b/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
+@@ -67,6 +67,14 @@ static bool CC_PPC32_SVR4_Custom_AlignArgRegs(unsigned &ValNo, MVT &ValVT,
+                                               CCValAssign::LocInfo &LocInfo,
+                                               ISD::ArgFlagsTy &ArgFlags,
+                                               CCState &State) {
++  // The Xenon convention allocates registers and stack slots from a single cursor in
++  // CC_PPC32_Xenon. These SVR4 hooks allocate registers behind that cursor's back,
++  // which desynchronises the two: the cursor's own AllocateReg then fails and the
++  // argument falls into memory while the variadic homing loop still writes the
++  // register over that slot.
++  if (State.getMachineFunction().getSubtarget<PPCSubtarget>().isXenonABI())
++    return false;
++
+   static const MCPhysReg ArgRegs[] = {
+     PPC::R3, PPC::R4, PPC::R5, PPC::R6,
+     PPC::R7, PPC::R8, PPC::R9, PPC::R10,
+@@ -92,6 +100,14 @@ static bool CC_PPC32_SVR4_Custom_AlignArgRegs(unsigned &ValNo, MVT &ValVT,
+ static bool CC_PPC32_SVR4_Custom_SkipLastArgRegsPPCF128(
+     unsigned &ValNo, MVT &ValVT, MVT &LocVT, CCValAssign::LocInfo &LocInfo,
+     ISD::ArgFlagsTy &ArgFlags, CCState &State) {
++  // The Xenon convention allocates registers and stack slots from a single cursor in
++  // CC_PPC32_Xenon. These SVR4 hooks allocate registers behind that cursor's back,
++  // which desynchronises the two: the cursor's own AllocateReg then fails and the
++  // argument falls into memory while the variadic homing loop still writes the
++  // register over that slot.
++  if (State.getMachineFunction().getSubtarget<PPCSubtarget>().isXenonABI())
++    return false;
++
+   static const MCPhysReg ArgRegs[] = {
+     PPC::R3, PPC::R4, PPC::R5, PPC::R6,
+     PPC::R7, PPC::R8, PPC::R9, PPC::R10,
+@@ -112,11 +128,88 @@ static bool CC_PPC32_SVR4_Custom_SkipLastArgRegsPPCF128(
+   return false;
+ }
+ 
++// The Xenon convention, measured from Microsoft's own compiled code.
++//
++// Every argument owns exactly one eight byte slot, starting just above the 16 byte
++// linkage area, whatever its type. Arguments one to eight also have a register: an
++// integer uses the general register that shares its slot, a float or double uses the
++// next free floating point register but still consumes its slot, so the general
++// register sharing it is skipped. D3DDevice_Clear in the XDK's d3d9.lib shows this
++// directly: its sixth argument is a float, and its seventh arrives in r9 rather than
++// r8. ClearSurface in the same object shows the float itself arriving in f1 even
++// though it is the ninth argument, so floating point registers run sequentially.
++//
++// Beyond the eighth slot the value is in memory. A scalar sits at the end of its slot,
++// which is what a callee spilling a 64 bit register with std leaves behind on a big
++// endian machine; ClearSurface homes its fourth argument with `stw r6, caller_sp+44`,
++// four bytes into the eight byte slot at +40. Aggregates larger than a slot, or whose
++// size is not a power of two, are left justified instead. That is the rule the XDK's
++// own vadefs.h states as _VA_IS_LEFT_JUSTIFIED.
++//
++// Known gap: a 64 bit integer reaches this hook already split into two i32 pieces, so
++// it takes two slots where Microsoft's compiler uses one 64 bit register and one slot.
++static bool CC_PPC32_Xenon(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
++                           CCValAssign::LocInfo &LocInfo,
++                           ISD::ArgFlagsTy &ArgFlags, CCState &State) {
++  static const MCPhysReg GPRs[] = {PPC::R3, PPC::R4, PPC::R5, PPC::R6,
++                                   PPC::R7, PPC::R8, PPC::R9, PPC::R10};
++  // f1 through f13. Nothing below f14 ever appears in the XDK's __savefpr helpers,
++  // so f0-f13 are volatile and all of f1-f13 can carry arguments.
++  static const MCPhysReg FPRs[] = {PPC::F1, PPC::F2, PPC::F3,  PPC::F4,  PPC::F5,
++                                   PPC::F6, PPC::F7, PPC::F8,  PPC::F9,  PPC::F10,
++                                   PPC::F11, PPC::F12, PPC::F13};
++  const unsigned SlotSize = 8;
++  const unsigned LinkageSize = 16;
++
++  unsigned Size = LocVT.getStoreSize();
++  unsigned Alloc = (Size + SlotSize - 1) & ~(SlotSize - 1);
++  if (Alloc < SlotSize)
++    Alloc = SlotSize;
++
++  // The slot cursor is the stack size itself, so a register argument still burns its
++  // slot and the caller's home area stays in step with the register numbering.
++  unsigned Offset = State.AllocateStack(Alloc, Align(SlotSize));
++  unsigned Slot = (Offset - LinkageSize) / SlotSize;
++
++  if (LocVT == MVT::f32 || LocVT == MVT::f64) {
++    // A floating point argument takes a floating point register whatever slot it
++    // landed in, not just within the first eight: ClearSurface in the XDK's d3d9.lib
++    // receives its ninth argument, a float, in f1. It consumes its slot either way,
++    // so the general register sharing that slot is skipped.
++    if (Slot < std::size(GPRs))
++      State.AllocateReg(GPRs[Slot]);
++    if (MCRegister FPR = State.AllocateReg(FPRs)) {
++      State.addLoc(CCValAssign::getReg(ValNo, ValVT, FPR, LocVT, LocInfo));
++      return true;
++    }
++  } else if (Slot < std::size(GPRs)) {
++    if (MCRegister GPR = State.AllocateReg(GPRs[Slot])) {
++      State.addLoc(CCValAssign::getReg(ValNo, ValVT, GPR, LocVT, LocInfo));
++      return true;
++    }
++  }
++
++  bool LeftJustified = Size > SlotSize || (Size & (Size - 1)) != 0;
++  if (!LeftJustified && Size < SlotSize)
++    Offset += SlotSize - Size;
++
++  State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
++  return true;
++}
++
+ static bool CC_PPC32_SVR4_Custom_AlignFPArgRegs(unsigned &ValNo, MVT &ValVT,
+                                                 MVT &LocVT,
+                                                 CCValAssign::LocInfo &LocInfo,
+                                                 ISD::ArgFlagsTy &ArgFlags,
+                                                 CCState &State) {
++  // The Xenon convention allocates registers and stack slots from a single cursor in
++  // CC_PPC32_Xenon. These SVR4 hooks allocate registers behind that cursor's back,
++  // which desynchronises the two: the cursor's own AllocateReg then fails and the
++  // argument falls into memory while the variadic homing loop still writes the
++  // register over that slot.
++  if (State.getMachineFunction().getSubtarget<PPCSubtarget>().isXenonABI())
++    return false;
++
+   static const MCPhysReg ArgRegs[] = {
+     PPC::F1, PPC::F2, PPC::F3, PPC::F4, PPC::F5, PPC::F6, PPC::F7,
+     PPC::F8
+diff --git a/llvm/lib/Target/PowerPC/PPCCallingConv.td b/llvm/lib/Target/PowerPC/PPCCallingConv.td
+index 5d4fe06eb..eec1005e6 100644
+--- a/llvm/lib/Target/PowerPC/PPCCallingConv.td
++++ b/llvm/lib/Target/PowerPC/PPCCallingConv.td
+@@ -215,6 +215,11 @@ def CC_PPC32_SVR4_Common : CallingConv<[
+   // The 'nest' parameter, if any, is passed in R11.
+   CCIfNest<CCAssignToReg<[R11]>>,
+ 
++  // Xenon assigns registers and stack slots from a single cursor, because a floating
++  // point argument consumes the integer register sharing its slot. See CC_PPC32_Xenon.
++  CCIfType<[i32, f32, f64],
++           CCIfSubtarget<"isXenonABI()", CCCustom<"CC_PPC32_Xenon">>>,
++
+   // The first 8 integer arguments are passed in integer registers.
+   CCIfType<[i32], CCAssignToReg<[R3, R4, R5, R6, R7, R8, R9, R10]>>,
+ 
+diff --git a/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp b/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp
+index aae3e49f6..125f85cc4 100644
+--- a/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp
++++ b/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp
+@@ -41,6 +41,13 @@ EnablePEVectorSpills("ppc-enable-pe-vector-spills",
+                      cl::init(false), cl::Hidden);
+ 
+ static unsigned computeReturnSaveOffset(const PPCSubtarget &STI) {
++  // A Xenon callee spills LR as a word at caller_sp-8, which is inside its own
++  // frame rather than the caller's linkage area. SVR4 puts it at +4 and AIX at
++  // +8; neither is compatible, which is why calling XDK code from SysV output
++  // corrupts the caller.
++  if (STI.isXenonABI())
++    return -8U;
++
+   if (STI.isAIXABI())
+     return STI.isPPC64() ? 16 : 8;
+   // SVR4 ABI:
+@@ -59,6 +66,10 @@ static unsigned computeFramePointerSaveOffset(const PPCSubtarget &STI) {
+ }
+ 
+ static unsigned computeLinkageSize(const PPCSubtarget &STI) {
++  // Xenon reserves 16 bytes, so the parameter save area starts at caller_sp+16.
++  if (STI.isXenonABI())
++    return 16;
++
+   if (STI.isAIXABI() || STI.isPPC64())
+     return (STI.isELFv2ABI() ? 4 : 6) * (STI.isPPC64() ? 8 : 4);
+ 
+@@ -2087,8 +2098,21 @@ void PPCFrameLowering::processFunctionBeforeFrameFinalized(MachineFunction &MF,
+     }
+   }
+ 
+-  // Early exit if no callee saved registers are modified!
+-  if (CSI.empty() && !needsFP(MF)) {
++  // A Xenon callee spills LR into its own frame at caller_sp-8. Nothing else in the
++  // frame layout knows that word is taken: the callee-saved adjustment further down
++  // only relocates saved registers, and it is not reached at all by a function that
++  // saves none. Give the word a real frame object so the generic allocator starts
++  // locals, byval copies and the outgoing parameter area below it on every path.
++  if (Subtarget.isXenonABI() && MF.getInfo<PPCFunctionInfo>()->mustSaveLR())
++    MFI.CreateFixedObject(8, -8, /*IsImmutable=*/true);
++
++  // Early exit if no callee saved registers are modified! The base pointer and PIC
++  // base slots are placed at caller_sp-8 by default, which under Xenon is the return
++  // address, so their relocation below has to run even when nothing else is saved.
++  if (CSI.empty() && !needsFP(MF) &&
++      !(Subtarget.isXenonABI() &&
++        (MF.getInfo<PPCFunctionInfo>()->usesPICBase() ||
++         Subtarget.getRegisterInfo()->hasBasePointer(MF)))) {
+     addScavengingSpillSlot(MF, RS);
+     return;
+   }
+@@ -2168,6 +2192,13 @@ void PPCFrameLowering::processFunctionBeforeFrameFinalized(MachineFunction &MF,
+     LowerBound = TCSPDelta;
+   }
+ 
++  // A Xenon callee spills LR into its own frame at caller_sp-8 rather than into the
++  // caller's linkage area, which is where every other PowerPC ABI puts it. Nothing
++  // else reserves that word, so the callee-saved areas have to start below it; left
++  // at zero the first saved register is given the same slot as the return address.
++  if (Subtarget.isXenonABI())
++    LowerBound -= 8;
++
+   // The Floating-point register save area is right below the back chain word
+   // of the previous stack frame.
+   if (HasFPSaveArea) {
+diff --git a/llvm/lib/Target/PowerPC/PPCISelLowering.cpp b/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
+index 48d76fe04..4b19e9ef5 100644
+--- a/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
++++ b/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
+@@ -113,6 +113,11 @@ cl::desc("disable preincrement load/store generation on PPC"), cl::Hidden);
+ static cl::opt<bool> DisableILPPref("disable-ppc-ilp-pref",
+ cl::desc("disable setting the node scheduling preference to ILP on PPC"), cl::Hidden);
+ 
++// A Xenon caller owns a home slot for each of the eight argument registers, above the
++// 16 byte linkage area, so the parameter save area is never smaller than this even for
++// a call that passes nothing: the callee is free to spill its own arguments there.
++static const unsigned XenonMinParamAreaSize = 16 + 8 * 8;
++
+ static cl::opt<bool> DisablePPCUnaligned("disable-ppc-unaligned",
+ cl::desc("disable unaligned load/store generation on PPC"), cl::Hidden);
+ 
+@@ -3919,9 +3924,10 @@ SDValue PPCTargetLowering::LowerVASTART(SDValue Op, SelectionDAG &DAG) const {
+ 
+   SDLoc dl(Op);
+ 
+-  if (Subtarget.isPPC64() || Subtarget.isAIXABI()) {
++  if (Subtarget.isPPC64() || Subtarget.isAIXABI() || Subtarget.isXenonABI()) {
+     // vastart just stores the address of the VarArgsFrameIndex slot into the
+-    // memory location argument.
++    // memory location argument. The Xenon va_list is a plain pointer walking the
++    // caller's parameter save area, so it works the same way.
+     SDValue FR = DAG.getFrameIndex(FuncInfo->getVarArgsFrameIndex(), PtrVT);
+     const Value *SV = cast<SrcValueSDNode>(Op.getOperand(2))->getValue();
+     return DAG.getStore(Op.getOperand(0), dl, FR, Op.getOperand(1),
+@@ -4319,6 +4325,41 @@ SDValue PPCTargetLowering::LowerFormalArguments_32SVR4(
+     FuncInfo->setVarArgsNumGPR(CCInfo.getFirstUnallocated(GPArgRegs));
+     FuncInfo->setVarArgsNumFPR(CCInfo.getFirstUnallocated(FPArgRegs));
+ 
++    // Xenon keeps the variable arguments in the caller's own parameter save area
++    // rather than in a private save area, and its va_list is a single pointer
++    // walking those slots. A named argument is already accounted for by the slot
++    // cursor, so only the registers from the first unnamed argument onward have to
++    // be homed. wsprintfA in the XDK does exactly this: it stores r5 through r10
++    // into slots 3 to 8 and then points va_list at slot 3.
++    //
++    // Known gap: a variadic double has to travel in the 64 bit general register
++    // sharing its slot, because the callee homes that register over the slot
++    // without knowing the type. A 32 bit PowerPC subtarget cannot express that, so
++    // floating point variable arguments are not supported yet.
++    if (Subtarget.isXenonABI()) {
++      const unsigned LinkageSize = Subtarget.getFrameLowering()->getLinkageSize();
++      const unsigned SlotSize = 8;
++      unsigned FirstUnnamed = (CCInfo.getStackSize() - LinkageSize) / SlotSize;
++
++      FuncInfo->setVarArgsFrameIndex(MFI.CreateFixedObject(
++          PtrVT.getSizeInBits() / 8, CCInfo.getStackSize(), true));
++
++      for (unsigned i = FirstUnnamed; i < NumGPArgRegs; ++i) {
++        Register VReg = MF.getRegInfo().getLiveInVirtReg(GPArgRegs[i]);
++        if (!VReg)
++          VReg = MF.addLiveIn(GPArgRegs[i], &PPC::GPRCRegClass);
++
++        // A 32 bit value sits at the end of its eight byte slot, which is where a
++        // callee spilling the whole 64 bit register with std leaves it.
++        int FI = MFI.CreateFixedObject(PtrVT.getSizeInBits() / 8,
++                                       LinkageSize + i * SlotSize + 4, false);
++        SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, PtrVT);
++        MemOps.push_back(DAG.getStore(Val.getValue(1), dl, Val,
++                                      DAG.getFrameIndex(FI, PtrVT),
++                                      MachinePointerInfo::getFixedStack(MF, FI)));
++      }
++    } else {
++
+     // Make room for NumGPArgRegs and NumFPArgRegs.
+     int Depth = NumGPArgRegs * PtrVT.getSizeInBits()/8 +
+                 NumFPArgRegs * MVT(MVT::f64).getSizeInBits()/8;
+@@ -4367,6 +4408,7 @@ SDValue PPCTargetLowering::LowerFormalArguments_32SVR4(
+                                          PtrVT);
+       FIN = DAG.getNode(ISD::ADD, dl, PtrOff.getValueType(), FIN, PtrOff);
+     }
++    }
+   }
+ 
+   if (!MemOps.empty())
+@@ -5947,7 +5989,14 @@ SDValue PPCTargetLowering::LowerCall_32SVR4(
+   CCState CCByValInfo(CallConv, IsVarArg, MF, ByValArgLocs, *DAG.getContext());
+ 
+   // Reserve stack space for the allocations in CCInfo.
+-  CCByValInfo.AllocateStack(CCInfo.getStackSize(), PtrAlign);
++  // A by-value copy must start above the eight home slots. Those belong to the
++  // callee, which is free to spill its own argument registers there: a variadic
++  // callee homes r5 through r10 into exactly that range, straight through a copy
++  // parked at the raw parameter cursor.
++  unsigned ByValStart = CCInfo.getStackSize();
++  if (Subtarget.isXenonABI())
++    ByValStart = std::max(ByValStart, XenonMinParamAreaSize);
++  CCByValInfo.AllocateStack(ByValStart, PtrAlign);
+ 
+   CCByValInfo.AnalyzeCallOperands(Outs, CC_PPC32_SVR4_ByVal);
+ 
+@@ -5956,6 +6005,10 @@ SDValue PPCTargetLowering::LowerCall_32SVR4(
+   // stored.
+   unsigned NumBytes = CCByValInfo.getStackSize();
+ 
++  // A Xenon caller owns all eight home slots whether or not it fills them.
++  if (Subtarget.isXenonABI())
++    NumBytes = std::max(NumBytes, XenonMinParamAreaSize);
++
+   // Calculate by how many bytes the stack has to be adjusted in case of tail
+   // call optimization.
+   int SPDiff = CalculateTailCallSPDiff(DAG, IsTailCall, NumBytes);
+diff --git a/llvm/lib/Target/PowerPC/PPCSubtarget.cpp b/llvm/lib/Target/PowerPC/PPCSubtarget.cpp
+index 85e022a2b..e5484b401 100644
+--- a/llvm/lib/Target/PowerPC/PPCSubtarget.cpp
++++ b/llvm/lib/Target/PowerPC/PPCSubtarget.cpp
+@@ -112,6 +112,8 @@ void PPCSubtarget::initSubtargetFeatures(StringRef CPU, StringRef TuneCPU,
+   if (HasSPE && (HasAltivec || HasVSX || HasFPU))
+     report_fatal_error(
+         "SPE and traditional floating point cannot both be enabled.\n", false);
++  if (HasSPE && HasXenonABI)
++    report_fatal_error("The Xenon ABI and SPE cannot both be enabled.\n", false);
+ 
+   // If not SPE, set standard FPU
+   if (!HasSPE)
+diff --git a/llvm/lib/Target/PowerPC/PPCSubtarget.h b/llvm/lib/Target/PowerPC/PPCSubtarget.h
+index 7d9335880..47052449b 100644
+--- a/llvm/lib/Target/PowerPC/PPCSubtarget.h
++++ b/llvm/lib/Target/PowerPC/PPCSubtarget.h
+@@ -206,6 +206,11 @@ public:
+ 
+   bool isAIXABI() const { return getTargetTriple().isOSAIX(); }
+   bool isSVR4ABI() const { return !isAIXABI(); }
++  /// The Xbox 360 convention. It is not SVR4 and it is not AIX: the linkage area
++  /// is 16 bytes, arguments spill to the caller's frame from +16 in 8 byte slots,
++  /// and the callee saves LR below the caller's stack pointer rather than inside
++  /// the caller's linkage area. Measured from the XDK's own libcMT.lib.
++  bool isXenonABI() const { return HasXenonABI; }
+   bool isELFv2ABI() const;
+ 
+   bool is64BitELFABI() const { return isSVR4ABI() && isPPC64(); }

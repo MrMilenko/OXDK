@@ -1,0 +1,28 @@
+OXDK is released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute it,
+by any means and for any purpose, commercial or non-commercial. No attribution
+is required, though it is welcome. The tools and the patches exist to be
+expanded and reused by whoever wants them.
+
+This applies to the parts written for OXDK: the build system, the shims, the
+tools under xbox/tools and xbox360/tools, the LLVM patches under xbox360/llvm,
+the scripts, the samples, and the documentation.
+
+It does not apply to everything in the tree.
+
+Third party code keeps its own license. The vendored libraries under
+xbox/third-party and xbox360/third-party carry their own terms, and the LLVM
+patches are changes to LLVM, which is Apache-2.0 WITH LLVM-exception. The two
+libc++ headers checked in under common/libcxx are copies of LLVM's own and
+carry that same license. Anything you build with OXDK is yours and keeps
+whatever license you give it.
+
+Microsoft's XDK is not here and is not ours to give. You supply your own.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

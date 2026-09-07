@@ -1,0 +1,56 @@
+#!/usr/bin/env sh
+# Open a shell set up for OXDK work.
+#
+#   ./oxdk              a shell targeting the original Xbox
+#   ./oxdk 360          a shell targeting the Xbox 360
+#   ./oxdk doctor       report what was found, then exit
+#   ./oxdk build-llvm   build the compiler both consoles use, then exit
+#
+# The shell it opens is your own, with the toolchain, the XDKs and the tools on
+# PATH. Type exit to leave it.
+
+ROOT=$(cd "$(dirname "$0")" && pwd)
+
+case "${1:-}" in
+    doctor)      exec "$ROOT/scripts/doctor.sh" ;;
+    build-llvm)  shift; exec "$ROOT/scripts/build-llvm.sh" "$@" ;;
+    -h|--help|help)
+        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0 ;;
+esac
+
+TARGET=${1:-xbox}
+case "$TARGET" in
+    xbox) LABEL=xbox ;;
+    360|xbox360|xenon) TARGET=xbox360; LABEL=xbox360 ;;
+    *) echo "Unknown target \"$TARGET\". Use xbox or 360."; exit 1 ;;
+esac
+
+if [ -n "$OXDK_TARGET" ]; then
+    echo "An OXDK shell is already open, targeting $OXDK_TARGET. Type exit first."
+    exit 1
+fi
+
+SHELL_TO_RUN=${SHELL:-/bin/sh}
+
+echo
+echo "  OXDK"
+echo "  Xbox and Xbox 360 development on macOS and Linux."
+echo
+
+# The environment is built here and inherited, so this works whatever shell you
+# use. Type exit to get your old shell back.
+. "$ROOT/scripts/oxdk-env.sh" "$TARGET"
+
+echo
+echo "  build a sample:  make -C xbox/samples/libcxx/cxx17_hello"
+echo "  check the setup: doctor.sh"
+echo "  leave:           exit"
+echo
+
+OXDK_SHELL=1
+export OXDK_SHELL
+PS1="(oxdk:$LABEL) \$ "
+export PS1
+
+exec "$SHELL_TO_RUN"

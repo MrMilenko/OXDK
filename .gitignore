@@ -1,32 +1,38 @@
-# XDK files -- users must supply their own
-xdk/lib/*.lib
-xdk/include/*
-!xdk/include/.gitkeep
-
-# Prebuilt sample bundles (regenerable build output)
-dist/
-
-# Build output (but not the bin/ wrapper scripts)
-**/bin/*.obj
-**/bin/*.exe
-**/bin/*.xbe
-**/bin/*.map
-*.obj
-*.exe
-*.xbe
-*.map
-*.pdb
-
-# cxbe binary
-tools/cxbe/cxbe
-
-# xbx-convert (Go) build output
-tools/xbx/go/xbx-convert
-tools/xbx/go/xbx-convert.exe
-tools/xbx/go/dist/
-
-# xbx-convert dev samples
-tools/xbx/nanoha.png
-tools/xbx/nanoha.xbx
+# The XDKs. You supply your own; they are not redistributable.
+xbox/xdk/lib/*.lib
+xbox/xdk/include/*
+!xbox/xdk/include/.gitkeep
+xbox360/xdk/
 
 .DS_Store
+dist/
+
+# Build output
+*.o
+*.o.tmp
+*.obj
+*.a
+*.exe
+*.map
+*.pdb
+*.elf
+*.bin
+*.xbe
+*.xex
+*.pe
+*.image
+.oxdklink/
+
+# Built tools
+xbox/tools/cxbe/cxbe
+xbox360/tools/cxex/cxex
+xbox/tools/xbx/go/xbx-convert
+xbox/tools/xbx/go/xbx-convert.exe
+xbox/tools/xbx/go/dist/
+
+# xbx-convert dev samples
+xbox/tools/xbx/nanoha.png
+xbox/tools/xbx/nanoha.xbx
+
+xbox360/oxdk360/libcxx-lib/build/
+

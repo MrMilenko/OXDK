@@ -1,0 +1,348 @@
+--- a/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
++++ b/llvm/lib/Target/PowerPC/PPCCallingConv.cpp
+@@ -161,6 +161,14 @@
+   const unsigned SlotSize = 8;
+   const unsigned LinkageSize = 16;
+ 
++  // Default argument promotion widens float to double before a variable argument
++  // gets here, and va_arg reads ((double *)ap)[-1] out of the slot either way, so
++  // anything floating point that reaches this point unnamed is a double.
++  if (ArgFlags.isVarArg() && LocVT == MVT::f32) {
++    LocVT = MVT::f64;
++    LocInfo = CCValAssign::FPExt;
++  }
++
+   unsigned Size = LocVT.getStoreSize();
+   unsigned Alloc = (Size + SlotSize - 1) & ~(SlotSize - 1);
+   if (Alloc < SlotSize)
+@@ -172,10 +180,37 @@
+   unsigned Slot = (Offset - LinkageSize) / SlotSize;
+ 
+   if (LocVT == MVT::f32 || LocVT == MVT::f64) {
+-    // A floating point argument takes a floating point register whatever slot it
+-    // landed in, not just within the first eight: ClearSurface in the XDK's d3d9.lib
+-    // receives its ninth argument, a float, in f1. It consumes its slot either way,
+-    // so the general register sharing that slot is skipped.
++    // A variable floating point argument is read back by va_arg, which walks the
++    // parameter save area, and the callee fills that area by storing the whole 64
++    // bit general register sharing the slot. Microsoft's _output_l reads a %f
++    // argument with `ld r10, 0(r11)` straight out of the slot and never touches a
++    // floating point register on that path, so the double has to be in the general
++    // register as the full doubleword. The floating point register is set as well,
++    // which is what the 64 bit SVR4 and AIX conventions do for a variable argument.
++    if (ArgFlags.isVarArg()) {
++      MCRegister GPR;
++      if (Slot < std::size(GPRs))
++        GPR = State.AllocateReg(GPRs[Slot]);
++      if (GPR) {
++        if (MCRegister FPR = State.AllocateReg(FPRs))
++          State.addLoc(CCValAssign::getReg(ValNo, ValVT, FPR, LocVT, LocInfo));
++        // The custom location is the general register the callee homes. It always
++        // follows the floating point location for the same value.
++        State.addLoc(
++            CCValAssign::getCustomReg(ValNo, ValVT, GPR, LocVT, LocInfo));
++        return true;
++      }
++      // Past the eighth slot there is no register, so the value has to reach memory
++      // itself. A double fills its slot exactly, which is where ((double *)ap)[-1]
++      // reads it, so no justification adjustment applies.
++      State.addLoc(CCValAssign::getMem(ValNo, ValVT, Offset, LocVT, LocInfo));
++      return true;
++    }
++
++    // A named floating point argument takes a floating point register whatever slot
++    // it landed in, not just within the first eight: ClearSurface in the XDK's
++    // d3d9.lib receives its ninth argument, a float, in f1. It consumes its slot
++    // either way, so the general register sharing that slot is skipped.
+     if (Slot < std::size(GPRs))
+       State.AllocateReg(GPRs[Slot]);
+     if (MCRegister FPR = State.AllocateReg(FPRs)) {
+--- a/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
++++ b/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
+@@ -117,6 +117,25 @@
+ // 16 byte linkage area, so the parameter save area is never smaller than this even for
+ // a call that passes nothing: the callee is free to spill its own arguments there.
+ static const unsigned XenonMinParamAreaSize = 16 + 8 * 8;
++
++// The eight Xenon argument slots and the registers that share them. Slot i sits at
++// XenonLinkageSize + i * XenonSlotSize in the caller's parameter save area, and the
++// callee homes the whole 64 bit register into it, so a value that has to survive
++// va_arg must be present in the 64 bit view of the register.
++static const unsigned XenonLinkageSize = 16;
++static const unsigned XenonSlotSize = 8;
++static const MCPhysReg XenonArgGPRs[] = {PPC::R3, PPC::R4, PPC::R5, PPC::R6,
++                                         PPC::R7, PPC::R8, PPC::R9, PPC::R10};
++static const MCPhysReg XenonArgGPR64s[] = {PPC::X3, PPC::X4, PPC::X5, PPC::X6,
++                                           PPC::X7, PPC::X8, PPC::X9, PPC::X10};
++
++// The slot a Xenon argument register owns, or -1 if it is not an argument register.
++static int getXenonArgSlot(MCRegister Reg) {
++  for (unsigned I = 0; I != std::size(XenonArgGPRs); ++I)
++    if (XenonArgGPRs[I] == Reg)
++      return (int)I;
++  return -1;
++}
+ 
+ static cl::opt<bool> DisablePPCUnaligned("disable-ppc-unaligned",
+ cl::desc("disable unaligned load/store generation on PPC"), cl::Hidden);
+@@ -4332,10 +4351,12 @@
+     // be homed. wsprintfA in the XDK does exactly this: it stores r5 through r10
+     // into slots 3 to 8 and then points va_list at slot 3.
+     //
+-    // Known gap: a variadic double has to travel in the 64 bit general register
+-    // sharing its slot, because the callee homes that register over the slot
+-    // without knowing the type. A 32 bit PowerPC subtarget cannot express that, so
+-    // floating point variable arguments are not supported yet.
++    // Each register is homed as a whole doubleword, which is what Microsoft's own
++    // variadic functions do: _snprintf opens with std r6, 40(r1) through
++    // std r10, 72(r1). va_arg reads a double as ((double *)ap)[-1], all eight bytes
++    // of the slot, so a word store would leave the high half of a variadic double
++    // uninitialised. A 32 bit scalar still lands at the end of its slot, which is
++    // where ((int *)ap)[-1] reads it on a big endian machine.
+     if (Subtarget.isXenonABI()) {
+       const unsigned LinkageSize = Subtarget.getFrameLowering()->getLinkageSize();
+       const unsigned SlotSize = 8;
+@@ -4345,18 +4366,16 @@
+           PtrVT.getSizeInBits() / 8, CCInfo.getStackSize(), true));
+ 
+       for (unsigned i = FirstUnnamed; i < NumGPArgRegs; ++i) {
+-        Register VReg = MF.getRegInfo().getLiveInVirtReg(GPArgRegs[i]);
+-        if (!VReg)
+-          VReg = MF.addLiveIn(GPArgRegs[i], &PPC::GPRCRegClass);
++        if (!MF.getRegInfo().isLiveIn(XenonArgGPR64s[i]))
++          MF.getRegInfo().addLiveIn(XenonArgGPR64s[i]);
+ 
+-        // A 32 bit value sits at the end of its eight byte slot, which is where a
+-        // callee spilling the whole 64 bit register with std leaves it.
+-        int FI = MFI.CreateFixedObject(PtrVT.getSizeInBits() / 8,
+-                                       LinkageSize + i * SlotSize + 4, false);
+-        SDValue Val = DAG.getCopyFromReg(Chain, dl, VReg, PtrVT);
+-        MemOps.push_back(DAG.getStore(Val.getValue(1), dl, Val,
+-                                      DAG.getFrameIndex(FI, PtrVT),
+-                                      MachinePointerInfo::getFixedStack(MF, FI)));
++        int FI = MFI.CreateFixedObject(SlotSize, LinkageSize + i * SlotSize,
++                                       false);
++        SDValue Ops[] = {
++            Chain, DAG.getFrameIndex(FI, PtrVT),
++            DAG.getTargetConstant(XenonArgGPR64s[i], dl, MVT::i32)};
++        MemOps.push_back(
++            DAG.getNode(PPCISD::XENON_HOME_STD, dl, MVT::Other, Ops));
+       }
+     } else {
+ 
+@@ -5695,9 +5714,11 @@
+     Ops.push_back(DAG.getConstant(SPDiff, dl, MVT::i32));
+ 
+   // Add argument registers to the end of the list so that they are known live
+-  // into the call.
++  // into the call. A Xenon variadic floating point argument has no value to copy:
++  // PPCISD::XENON_HOME_LD wrote the 64 bit register directly, and the entry exists
++  // only to keep that register live into the call.
+   for (const auto &[Reg, N] : RegsToPass)
+-    Ops.push_back(DAG.getRegister(Reg, N.getValueType()));
++    Ops.push_back(DAG.getRegister(Reg, N ? N.getValueType() : MVT::i64));
+ 
+   // We cannot add R2/X2 as an operand here for PATCHPOINT, because there is
+   // no way to mark dependencies as implicit here.
+@@ -5706,8 +5727,9 @@
+        !CFlags.IsPatchPoint && !Subtarget.isUsingPCRelativeCalls())
+     Ops.push_back(DAG.getRegister(Subtarget.getTOCPointerRegister(), RegVT));
+ 
+-  // Add implicit use of CR bit 6 for 32-bit SVR4 vararg calls
+-  if (CFlags.IsVarArg && Subtarget.is32BitELFABI())
++  // Add implicit use of CR bit 6 for 32-bit SVR4 vararg calls. Xenon has no such
++  // signal: its variadic callees walk the parameter save area and never read CR6.
++  if (CFlags.IsVarArg && Subtarget.is32BitELFABI() && !Subtarget.isXenonABI())
+     Ops.push_back(DAG.getRegister(PPC::CR1EQ, MVT::i32));
+ 
+   // Add a register mask operand representing the call-preserved registers.
+@@ -6033,6 +6055,34 @@
+   SmallVector<SDValue, 8> MemOpChains;
+ 
+   bool seenFloatArg = false;
++
++  // A Xenon variadic floating point argument also travels in the 64 bit general
++  // register that shares its slot, because that is the register the callee homes
++  // over the slot with a store doubleword before va_arg walks it - anything the
++  // caller left in the slot itself is overwritten. This core has no move between a
++  // floating point register and a general register, so the value goes out through
++  // its own home slot, which belongs to the callee anyway: stfd into the slot, then
++  // a 64 bit load back into the register. XenonMinParamAreaSize already guarantees
++  // all eight home slots exist in the outgoing frame, so nothing new is allocated.
++  //
++  // A variadic call is never a tail call here (IsEligibleForTailCallOptimization
++  // rejects isVarArg), so addressing the slot off r1 directly is safe.
++  SmallVector<std::pair<MCPhysReg, SDValue>, 4> XenonFPHomes;
++  auto EmitXenonFPHome = [&](const CCValAssign &GPRVA, SDValue Val) {
++    assert(!IsTailCall && "Xenon variadic call must not be a tail call");
++    int Slot = getXenonArgSlot(GPRVA.getLocReg());
++    assert(Slot >= 0 && "Xenon float home is not an argument register");
++    SDValue PtrOff = DAG.getNode(
++        ISD::ADD, dl, getPointerTy(MF.getDataLayout()), StackPtr,
++        DAG.getIntPtrConstant(XenonLinkageSize + Slot * XenonSlotSize, dl));
++    MemOpChains.push_back(
++        DAG.getStore(Chain, dl, Val, PtrOff, MachinePointerInfo()));
++    XenonFPHomes.push_back(std::make_pair(XenonArgGPR64s[Slot], PtrOff));
++    // No value to copy: the register is written by PPCISD::XENON_HOME_LD below.
++    // The entry exists so that the register is live into the call.
++    RegsToPass.push_back(std::make_pair(XenonArgGPR64s[Slot], SDValue()));
++  };
++
+   // Walk the register/memloc assignments, inserting copies/loads.
+   // i - Tracks the index into the list of registers allocated for the call
+   // RealArgIdx - Tracks the index into the list of actual function arguments
+@@ -6090,8 +6140,17 @@
+ 
+     if (VA.isRegLoc()) {
+       seenFloatArg |= VA.getLocVT().isFloatingPoint();
++
++      // A float that reached a Xenon variadic slot is widened: the slot holds a
++      // double, which is what va_arg reads back out of it.
++      if (VA.getLocInfo() == CCValAssign::FPExt)
++        Arg = DAG.getNode(ISD::FP_EXTEND, dl, VA.getLocVT(), Arg);
++
+       // Put argument in a physical register.
+-      if (Subtarget.hasSPE() && Arg.getValueType() == MVT::f64) {
++      if (Subtarget.isXenonABI() && VA.needsCustom()) {
++        // Only location for this value: every floating point register was taken.
++        EmitXenonFPHome(VA, Arg);
++      } else if (Subtarget.hasSPE() && Arg.getValueType() == MVT::f64) {
+         bool IsLE = Subtarget.isLittleEndian();
+         SDValue SVal = DAG.getNode(PPCISD::EXTRACT_SPE, dl, MVT::i32, Arg,
+                         DAG.getIntPtrConstant(IsLE ? 0 : 1, dl));
+@@ -6102,6 +6161,12 @@
+                              SVal.getValue(0)));
+       } else
+         RegsToPass.push_back(std::make_pair(VA.getLocReg(), Arg));
++
++      // The floating point location of a Xenon variadic argument is followed by the
++      // general register location the callee actually homes.
++      if (Subtarget.isXenonABI() && i + 1 != e && ArgLocs[i + 1].needsCustom() &&
++          ArgLocs[i + 1].getValNo() == VA.getValNo())
++        EmitXenonFPHome(ArgLocs[++i], Arg);
+     } else {
+       // Put argument in the parameter list area of the current stack frame.
+       assert(VA.isMemLoc());
+@@ -6129,13 +6194,30 @@
+   // and flag operands which copy the outgoing args into the appropriate regs.
+   SDValue InGlue;
+   for (const auto &[Reg, N] : RegsToPass) {
++    // A Xenon float home carries no value; the register is written just below.
++    if (!N)
++      continue;
+     Chain = DAG.getCopyToReg(Chain, dl, Reg, N, InGlue);
++    InGlue = Chain.getValue(1);
++  }
++
++  // Reload each Xenon variadic floating point argument out of its home slot into the
++  // 64 bit general register the callee will home back over that slot. This must sit
++  // inside the glue chain: nothing may write the low half of the register between the
++  // load and the branch, because a 32 bit write would destroy the high half with it.
++  for (const auto &[XReg, Addr] : XenonFPHomes) {
++    SDVTList VTs = DAG.getVTList(MVT::Other, MVT::Glue);
++    SDValue Ops[] = {Chain, Addr, DAG.getTargetConstant(XReg, dl, MVT::i32),
++                     InGlue};
++    Chain = DAG.getNode(PPCISD::XENON_HOME_LD, dl, VTs,
++                        ArrayRef(Ops, InGlue.getNode() ? 4 : 3));
+     InGlue = Chain.getValue(1);
+   }
+ 
+   // Set CR bit 6 to true if this is a vararg call with floating args passed in
+-  // registers.
+-  if (IsVarArg) {
++  // registers. Xenon has no such signal: its variadic callees walk the parameter
++  // save area and never read CR6.
++  if (IsVarArg && !Subtarget.isXenonABI()) {
+     SDVTList VTs = DAG.getVTList(MVT::Other, MVT::Glue);
+     SDValue Ops[] = { Chain, InGlue };
+ 
+--- a/llvm/lib/Target/PowerPC/PPCISelDAGToDAG.cpp
++++ b/llvm/lib/Target/PowerPC/PPCISelDAGToDAG.cpp
+@@ -5269,7 +5269,47 @@
+ 
+   switch (N->getOpcode()) {
+   default: break;
++
++  case PPCISD::XENON_HOME_LD: {
++    // Load the eight bytes of a Xenon parameter slot into the 64 bit general
++    // register that shares it. The destination is a physical X register named by a
++    // constant rather than an SDValue, because i64 is not a legal type in a 32 bit
++    // function; the load and the copy are both glued into the call sequence so that
++    // nothing can redefine the low half - and with it destroy the high half - of
++    // the register before the branch.
++    SDValue Chain = N->getOperand(0);
++    SDValue Disp, Base;
++    if (!SelectAddrImmX4(N->getOperand(1), Disp, Base))
++      report_fatal_error("Xenon home slot is not a DS-form address");
++    Register XReg(N->getConstantOperandVal(2));
++
++    SmallVector<SDValue, 4> Ops = {Disp, Base, Chain};
++    if (N->getNumOperands() > 3)
++      Ops.push_back(N->getOperand(3));
++
++    SDNode *Ld = CurDAG->getMachineNode(PPC::LD, dl, MVT::i64, MVT::Other,
++                                        MVT::Glue, Ops);
++    SDValue Copy = CurDAG->getCopyToReg(SDValue(Ld, 1), dl, XReg,
++                                        SDValue(Ld, 0), SDValue(Ld, 2));
++    ReplaceNode(N, Copy.getNode());
++    return;
++  }
+ 
++  case PPCISD::XENON_HOME_STD: {
++    // Home a whole 64 bit argument register into its parameter slot, the way
++    // Microsoft's own variadic functions do. The source is a physical X register
++    // that was added to the function's live-in list by LowerFormalArguments_32SVR4.
++    SDValue Chain = N->getOperand(0);
++    SDValue Disp, Base;
++    if (!SelectAddrImmX4(N->getOperand(1), Disp, Base))
++      report_fatal_error("Xenon home slot is not a DS-form address");
++    Register XReg(N->getConstantOperandVal(2));
++
++    SDValue Ops[] = {CurDAG->getRegister(XReg, MVT::i64), Disp, Base, Chain};
++    ReplaceNode(N, CurDAG->getMachineNode(PPC::STD, dl, MVT::Other, Ops));
++    return;
++  }
++
+   case ISD::Constant:
+     if (N->getValueType(0) == MVT::i64) {
+       ReplaceNode(N, selectI64Imm(CurDAG, N));
+--- a/llvm/lib/Target/PowerPC/PPCSelectionDAGInfo.h
++++ b/llvm/lib/Target/PowerPC/PPCSelectionDAGInfo.h
+@@ -57,6 +57,24 @@
+   /// operations on splats.  This is necessary to avoid losing these
+   /// optimizations due to constant folding.
+   VADD_SPLAT,
++
++  /// CHAIN, GLUE = XENON_HOME_LD CHAIN, ADDR, TargetConstant<physreg>[, GLUE]
++  /// Loads the eight bytes at ADDR into the named 64 bit general register.
++  /// The Xenon convention needs this because a variable floating point argument
++  /// has to arrive in the general register that shares its parameter slot: the
++  /// callee homes that whole register over the slot before va_arg walks it. The
++  /// core has no move between a floating point register and a general register,
++  /// so the caller stores the double into the slot and reloads the doubleword.
++  /// The destination is a physical register carried as a constant, so no i64
++  /// value ever exists in a function where i64 is not a legal type.
++  XENON_HOME_LD,
++
++  /// CHAIN = XENON_HOME_STD CHAIN, ADDR, TargetConstant<physreg>
++  /// Stores all eight bytes of the named 64 bit general register to ADDR. A
++  /// Xenon variadic callee homes its argument registers this way, matching what
++  /// Microsoft's own variadic functions do, so that va_arg finds a whole double
++  /// in the slot rather than just its low half.
++  XENON_HOME_STD,
+ };
+ 
+ } // namespace PPCISD
+--- a/llvm/lib/Target/PowerPC/PPCSelectionDAGInfo.cpp
++++ b/llvm/lib/Target/PowerPC/PPCSelectionDAGInfo.cpp
+@@ -41,6 +41,10 @@
+     return "PPCISD::PPC32_PICGOT";
+   case PPCISD::VADD_SPLAT:
+     return "PPCISD::VADD_SPLAT";
++  case PPCISD::XENON_HOME_LD:
++    return "PPCISD::XENON_HOME_LD";
++  case PPCISD::XENON_HOME_STD:
++    return "PPCISD::XENON_HOME_STD";
+   }
+ 
+   return SelectionDAGGenTargetInfo::getTargetNodeName(Opcode);
