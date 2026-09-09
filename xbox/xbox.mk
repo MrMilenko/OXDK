@@ -44,7 +44,7 @@ XBE_LIMIT64MB = yes
 endif
 
 ifeq ($(OUTPUT_DIR),)
-OUTPUT_DIR = bin
+OUTPUT_DIR ?= bin
 endif
 
 CXBE = $(OXDK_XBOX_DIR)/tools/cxbe/cxbe
@@ -103,9 +103,16 @@ OXDK_COMMON_FLAGS = -D_XBOX -D_X86_ -DWIN32_LEAN_AND_MEAN -D_NTOS_ -D_MT \
 	-Wno-deprecated-declarations -Wno-writable-strings -Wno-microsoft-cast \
 	-Wno-unknown-pragmas -Wno-extra-tokens -Wno-nonportable-include-path \
 	-Wno-typedef-redefinition \
+	-fno-builtin-exp2 -fno-builtin-exp2f \
+	-fno-builtin-log2 -fno-builtin-log2f \
 	-Xclang -fdefault-calling-conv=stdcall
 
-OXDK_CFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_COMMON_FLAGS) \
+# clang defaults to -O0, which is no default for a 733MHz console: it left a
+# YUV to RGB conversion costing about 225 cycles a pixel. Override OXDK_OPT to
+# build for debugging.
+OXDK_OPT ?= -O2
+
+OXDK_CFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_OPT) $(OXDK_COMMON_FLAGS) \
 	$(OXDK_LIBCXX_C_INC) -I$(OXDK_XBOX_DIR) $(OXDK_XDK_INC)
 
 # RTTI is on: libcmt ships __RTDynamicCast / __RTtypeid / __RTCastToVoid so
@@ -114,7 +121,7 @@ OXDK_CFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_COMMON_FLAGS) \
 # hash_code()) are provided in libcxx_runtime.cpp.
 # -fno-threadsafe-statics: C++11 magic statics need __Init_thread_* helpers
 # the XDK CRT doesn't ship; Xbox is single-threaded for static init anyway.
-OXDK_CXXFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_COMMON_FLAGS) \
+OXDK_CXXFLAGS = $(OXDK_TARGET_FLAGS) -c $(OXDK_OPT) $(OXDK_COMMON_FLAGS) \
 	-fno-threadsafe-statics \
 	$(OXDK_LIBCXX_CXX) $(OXDK_LIBCXX_INC) -I$(OXDK_XBOX_DIR) $(OXDK_XDK_INC)
 
@@ -151,17 +158,30 @@ OXDK_LIBS ?= libcmtd.lib libcpmtd.lib xboxkrnl.lib \
 	xapilibd.lib xapilib.lib xapilibp.lib
 
 # Build rules
-# OBJS handles .cpp, .cc and .c sources. Path separators in the source
-# (libSDLx is pulled in with absolute paths) flatten to their basenames
-# so a long source tree doesn't create a deeply nested OUTPUT_DIR.
-SRCS_BASE := $(notdir $(SRCS))
-OBJS_TMP  := $(patsubst %.cpp,%.obj,$(SRCS_BASE))
-OBJS_TMP  := $(patsubst %.cc,%.obj,$(OBJS_TMP))
-OBJS      := $(addprefix $(OUTPUT_DIR)/,$(patsubst %.c,%.obj,$(OBJS_TMP)))
+# One object per source, flat in OUTPUT_DIR so a deep source tree does not make
+# a deep object tree. Objects are named by basename, except where two sources
+# share one. SDL2x ships both thread/xbox/SDL_sysmutex.c and
+# thread/generic/SDL_sysmutex.c; those get the parent directory folded into the
+# object name. Every source then gets an explicit rule naming its exact path,
+# so nothing is located by a VPATH search. A VPATH search resolves by directory
+# order, which silently compiles the wrong backend.
+# Compared on the object stem, not the file name: log.cpp and log.c are
+# different sources but both want log.obj.
+OXDK_SRC_STEMS := $(basename $(notdir $(SRCS)))
+OXDK_DUP_STEMS := $(strip $(foreach b,$(sort $(OXDK_SRC_STEMS)), \
+                    $(if $(word 2,$(filter $(b),$(OXDK_SRC_STEMS))),$(b))))
 
-# Per-source vpath so the .cpp/.c pattern rules can find sources in
-# subdirectories (libSDLx is at ../../third-party/libSDLx/...).
-VPATH := $(sort $(dir $(SRCS)))
+oxdk_obj = $(OUTPUT_DIR)/$(strip $(if $(filter $(basename $(notdir $(1))),$(OXDK_DUP_STEMS)), \
+             $(notdir $(patsubst %/,%,$(dir $(1))))_$(basename $(notdir $(1))), \
+             $(basename $(notdir $(1))))).obj
+
+OBJS := $(foreach s,$(SRCS),$(call oxdk_obj,$(s)))
+
+OXDK_OBJ_DUPS := $(strip $(foreach o,$(sort $(OBJS)), \
+                   $(if $(word 2,$(filter $(o),$(OBJS))),$(notdir $(o)))))
+ifneq ($(OXDK_OBJ_DUPS),)
+$(error Sources collide on these object names: $(OXDK_OBJ_DUPS))
+endif
 
 .PHONY: all clean normalize-xdk
 
@@ -178,17 +198,21 @@ $(OUTPUT_DIR)/$(XBE_TITLE).exe: $(OBJS)
 	$(LLD_LINK) $(OXDK_LDFLAGS) $(OXDK_KERNEL_IMPORTS) $(OXDK_CRT_HELPERS) $(LDFLAGS) \
 		/map:$(OUTPUT_DIR)/$(XBE_TITLE).map /out:$@ $^ $(OXDK_LIBS) $(LIBS)
 
-$(OUTPUT_DIR)/%.obj: %.cpp | $(OUTPUT_DIR)
-	@mkdir -p $(dir $@)
-	$(CLANGXX) $(OXDK_CXXFLAGS) $(CXXFLAGS) -o $@ $<
+define oxdk_compile
+$(call oxdk_obj,$(1)): $(1) | $(OUTPUT_DIR)
+	$(2) $(3) -o $$@ $$<
+endef
 
-$(OUTPUT_DIR)/%.obj: %.cc | $(OUTPUT_DIR)
-	@mkdir -p $(dir $@)
-	$(CLANGXX) $(OXDK_CXXFLAGS) $(CXXFLAGS) -o $@ $<
+$(foreach s,$(filter %.c,$(SRCS)), \
+  $(eval $(call oxdk_compile,$(s),$$(CLANG),$$(OXDK_CFLAGS) $$(CFLAGS))))
 
-$(OUTPUT_DIR)/%.obj: %.c | $(OUTPUT_DIR)
-	@mkdir -p $(dir $@)
-	$(CLANG) $(OXDK_CFLAGS) $(CFLAGS) -o $@ $<
+# Hand written assembly, for projects that carry any. nasm takes the same
+# "flags -o output input" shape as the compilers above, so the rule is shared.
+NASM ?= nasm
+$(foreach s,$(filter %.asm,$(SRCS)), \
+  $(eval $(call oxdk_compile,$(s),$$(NASM),$$(ASMFLAGS))))
+$(foreach s,$(filter %.cpp %.cc,$(SRCS)), \
+  $(eval $(call oxdk_compile,$(s),$$(CLANGXX),$$(OXDK_CXXFLAGS) $$(CXXFLAGS))))
 
 $(OUTPUT_DIR):
 	@mkdir -p $(OUTPUT_DIR)
