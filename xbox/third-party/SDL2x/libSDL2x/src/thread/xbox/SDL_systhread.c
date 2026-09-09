@@ -68,8 +68,10 @@ int SDL_SYS_CreateThread(SDL_Thread* thread)
     DWORD threadnum;
 
     /* ?? pass the SDL_Thread*, NOT args */
+    /* Passing 0 here ignored the caller, so SDL_CreateThreadWithStackSize
+       had no effect. */
     thread->handle = CreateThread(NULL,
-        0,
+        thread->stacksize,
         RunThread,
         thread,          /* <- this is the important change */
         0,
