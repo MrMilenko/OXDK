@@ -85,6 +85,7 @@ typedef struct
     D3DFORMAT d3dfmt;
     IDirect3DTexture8* texture;
     IDirect3DTexture8* staging;
+    DWORD pendingFence;
 } D3D_TextureRep;
 
 typedef struct
@@ -174,6 +175,10 @@ static D3DFORMAT PixelFormatToD3DFMT(Uint32 format)
     case SDL_PIXELFORMAT_IYUV:
     case SDL_PIXELFORMAT_NV12:
     case SDL_PIXELFORMAT_NV21:     return D3DFMT_LIN_L8;
+    /* Packed 4:2:2, converted to RGB by the texture unit under
+       D3DRS_YUVENABLE. No LIN_ variant: the format is linear already. */
+    case SDL_PIXELFORMAT_YUY2:     return D3DFMT_YUY2;
+    case SDL_PIXELFORMAT_UYVY:     return D3DFMT_UYVY;
     default:                       return D3DFMT_UNKNOWN;
     }
 }
@@ -184,6 +189,8 @@ static Uint32 D3DFMTToPixelFormat(D3DFORMAT format)
     case D3DFMT_LIN_R5G6B5:   return SDL_PIXELFORMAT_RGB565;
     case D3DFMT_LIN_X8R8G8B8: return SDL_PIXELFORMAT_RGB888;
     case D3DFMT_LIN_A8R8G8B8: return SDL_PIXELFORMAT_ARGB8888;
+    case D3DFMT_YUY2:         return SDL_PIXELFORMAT_YUY2;
+    case D3DFMT_UYVY:         return SDL_PIXELFORMAT_UYVY;
     default:                  return SDL_PIXELFORMAT_UNKNOWN;
     }
 }
@@ -367,6 +374,7 @@ D3D_CreateTextureRep(IDirect3DDevice8* device, D3D_TextureRep* texture,
     if (h <= 0) h = 1;
 
     texture->dirty = SDL_FALSE;
+    texture->pendingFence = 0;
     texture->w = w;
     texture->h = h;
     texture->usage = usage;
@@ -476,6 +484,12 @@ D3D_UpdateTextureRep(IDirect3DDevice8* device, D3D_TextureRep* texture,
     d3drect.right = x + w;
     d3drect.bottom = y + h;
 
+    /* CopyRects is queued, not finished, so wait before overwriting. */
+    if (texture->pendingFence) {
+        D3DDevice_BlockOnFence(texture->pendingFence);
+        texture->pendingFence = 0;
+    }
+
     result = IDirect3DTexture8_LockRect(texture->staging, 0, &locked, &d3drect, 0);
     if (FAILED(result)) {
         return D3D_SetError("LockRect()", result);
@@ -490,7 +504,7 @@ D3D_UpdateTextureRep(IDirect3DDevice8* device, D3D_TextureRep* texture,
     src = (const Uint8*)pixels;
     dst = (Uint8*)locked.pBits;
 
-    if (pitch == (int)locked.Pitch && need == w * bpp) {
+    if (pitch == (int)locked.Pitch && need == (int)locked.Pitch) {
         SDL_memcpy(dst, src, (size_t)need * (size_t)h);
     }
     else {
@@ -514,6 +528,11 @@ D3D_UpdateTextureRep(IDirect3DDevice8* device, D3D_TextureRep* texture,
 static void D3D_DestroyTextureRep(D3D_TextureRep* texture)
 {
     if (!texture) return;
+
+    if (texture->pendingFence) {
+        D3DDevice_BlockOnFence(texture->pendingFence);
+        texture->pendingFence = 0;
+    }
 
     if (texture->texture) {
         IDirect3DTexture8_Release(texture->texture);
@@ -765,6 +784,12 @@ D3D_LockTexture(SDL_Renderer* renderer, SDL_Texture* texture,
 
         d3drect.left = r.x; d3drect.top = r.y; d3drect.right = r.x + r.w; d3drect.bottom = r.y + r.h;
 
+        /* CopyRects is queued, not finished, so wait before overwriting. */
+        if (texturedata->texture.pendingFence) {
+            D3DDevice_BlockOnFence(texturedata->texture.pendingFence);
+            texturedata->texture.pendingFence = 0;
+        }
+
         hr = IDirect3DTexture8_LockRect(texturedata->texture.staging, 0, &locked, &d3drect, 0);
         if (FAILED(hr)) return D3D_SetError("LockRect()", hr);
 
@@ -894,6 +919,7 @@ static int UpdateDirtyTexture(IDirect3DDevice8* device, D3D_TextureRep* texture)
     if (FAILED(hr)) {
         return D3D_SetError("UpdateTexture()", hr);
     }
+    texture->pendingFence = D3DDevice_InsertFence();
 
     texture->dirty = SDL_FALSE;
     return 0;
@@ -939,6 +965,17 @@ static int SetupTextureState(D3D_RenderData* data, SDL_Texture* texture)
     UpdateTextureScaleMode(data, texturedata, 0);
     if (BindTextureRep(data->device, &texturedata->texture, 0) < 0) return -1;
 
+    /* An Xbox extension: with this set the texture unit reads D3DFMT_YUY2 and
+       D3DFMT_UYVY as YUV and converts to RGB on the way out, so the CPU never
+       touches the colour. Off again for everything else, since it changes how
+       an ordinary texture would be read. */
+    {
+        const BOOL packedYuv = (texture->format == SDL_PIXELFORMAT_YUY2 ||
+                                texture->format == SDL_PIXELFORMAT_UYVY);
+        IDirect3DDevice8_SetRenderState(data->device, D3DRS_YUVENABLE,
+                                        packedYuv ? TRUE : FALSE);
+    }
+
     if (texturedata->yuv) {
         UpdateTextureScaleMode(data, texturedata, 1);
         UpdateTextureScaleMode(data, texturedata, 2);
@@ -983,6 +1020,11 @@ static int SetDrawState(D3D_RenderData* data, const SDL_RenderCommand* cmd)
 
         if (texture == NULL) {
             IDirect3DDevice8_SetTexture(data->device, 0, NULL);
+            /* Untextured geometry is solid colour, so the YUV reinterpretation
+               has to come off here too. SetupTextureState only runs when there
+               is a texture, so leaving it set turned every filled rectangle
+               after a video frame green. */
+            IDirect3DDevice8_SetRenderState(data->device, D3DRS_YUVENABLE, FALSE);
         }
         if ((!newtex || !newtex->yuv) && (oldtex && oldtex->yuv)) {
             IDirect3DDevice8_SetTexture(data->device, 1, NULL);
@@ -1540,6 +1582,7 @@ static int D3D_SetRenderTargetInternal(SDL_Renderer* renderer, SDL_Texture* text
             if (FAILED(hr)) {
                 return D3D_SetError("UpdateTexture()", hr);
             }
+            texturerep->pendingFence = D3DDevice_InsertFence();
             texturerep->dirty = SDL_FALSE;
         }
 
@@ -2072,8 +2115,8 @@ SDL_RenderDriver D3D_RenderDriver = {
     {
         "direct3d",
         (SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE),
-        1,
-        {SDL_PIXELFORMAT_ARGB8888},
+        2,
+        {SDL_PIXELFORMAT_ARGB8888, SDL_PIXELFORMAT_YUY2},
         0,
         0
     }
