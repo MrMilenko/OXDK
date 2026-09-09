@@ -58,6 +58,12 @@ string to_string(unsigned long v) { return uint_to_string(v, false); }
 string to_string(long long v) { return uint_to_string(v < 0 ? 0ull - static_cast<unsigned long long>(v) : static_cast<unsigned long long>(v), v < 0); }
 string to_string(unsigned long long v) { return uint_to_string(v, false); }
 
+// Concatenating a literal with a string is not inline in this configuration,
+// so it is instantiated here rather than left undefined at every call site.
+template basic_string<char, char_traits<char>, allocator<char> >
+operator+ <char, char_traits<char>, allocator<char> >(
+    const char*, const basic_string<char, char_traits<char>, allocator<char> >&);
+
 } // namespace __1
 } // namespace std
 
@@ -93,6 +99,42 @@ extern "C" int __cdecl snprintf(char *buf, std::size_t n, const char *fmt, ...) 
 extern "C" float  __cdecl expf(float x)  { return (float)exp((double)x); }
 extern "C" float  __cdecl logf(float x)  { return (float)log((double)x); }
 extern "C" float  __cdecl ldexpf(float x, int e) { return (float)ldexp((double)x, e); }
+extern "C" float  __cdecl powf(float x, float y)  { return (float)pow((double)x, (double)y); }
+extern "C" float  __cdecl fmodf(float x, float y) { return (float)fmod((double)x, (double)y); }
+
+// At -O2 clang rewrites pow(2, x) into a call to exp2, which the 2003 CRT does
+// not have, and -fno-builtin-exp2 does not stop it. optnone keeps the pow here
+// from being rewritten back into a call to this function.
+extern "C" __attribute__((optnone)) double __cdecl exp2(double x)
+{
+    return pow(2.0, x);
+}
+
+extern "C" __attribute__((optnone)) float __cdecl exp2f(float x)
+{
+    return (float)pow(2.0, (double)x);
+}
+
+// C99, and the 2003 CRT predates it. Round to nearest with ties to even,
+// which is what the x87 does in its default rounding mode.
+//
+// optnone on both: at -O2 the optimizer recognises these bodies as the very
+// idiom they implement and replaces them with a tail call to themselves. That
+// produced a one instruction infinite loop, "jmp $", which cost an afternoon
+// because a self jump never grows the stack and never faults.
+extern "C" __attribute__((optnone)) double __cdecl rint(double x)
+{
+    const double f = floor(x);
+    const double diff = x - f;
+    if (diff > 0.5) return f + 1.0;
+    if (diff < 0.5) return f;
+    return (fmod(f, 2.0) == 0.0) ? f : f + 1.0;
+}
+
+extern "C" __attribute__((optnone)) float __cdecl rintf(float x)
+{
+    return (float)rint((double)x);
+}
 extern "C" double __cdecl trunc(double x) { return x >= 0.0 ? floor(x) : ceil(x); }
 
 // Xbox has no environment block; the conventional "no such var" return is NULL.

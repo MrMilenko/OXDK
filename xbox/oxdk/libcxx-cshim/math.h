@@ -44,8 +44,16 @@ double __cdecl ceil(double);
 double __cdecl _hypot(double, double);
 double __cdecl _cabs(struct _complex);
 
+// The CRT has no float symbols for these: MSVC's math.h defines them as
+// inlines over the double versions, so libcxx-shim defines them instead.
 float __cdecl fabsf(float);
 float __cdecl sqrtf(float);
+float __cdecl powf(float, float);
+float __cdecl fmodf(float, float);
+double __cdecl exp2(double);
+float  __cdecl exp2f(float);
+double __cdecl rint(double);
+float  __cdecl rintf(float);
 
 #ifdef __cplusplus
 }
