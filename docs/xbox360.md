@@ -135,3 +135,8 @@ backend patch rather than a target triple. See
 - `xbox360/tools/xbdm`: deploy, launch, debug output, screenshots.
 - `xbox360/tools/xexutil`: dump, unpack and describe XEX files and COFF objects.
 - `xbox360/tools/abitest`: check a compiler and compiled objects against the ABI.
+  `nvcheck.py` and `callcheck.py` run the register and call cases under
+  qemu-ppc64; `sdkguard.py` lists calls into the XDK the ABI still gets wrong.
+- `xbox360/tools/xeniascan`: lists the code in a linked title that Xenia skips
+  or would compile as part of the wrong function, so a Xenia result can be
+  judged.
