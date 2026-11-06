@@ -8,6 +8,9 @@
 #   XDK_LIBS    - XDK libraries to link, comma separated (default: xapilib,libcMT)
 #   XEX_BASE    - image base (default 0x82000000, the title range)
 #   XEX_STACK   - stack size (default 0x100000)
+#   XEX_SYSFLAGS - XEX system flags (default 0x1; 0x21 for a title that handles a lost
+#                 controller itself, see tools/cxex/cxex.cpp)
+#   OXDK360_MS_BITFIELDS - 1 lays out bitfields as Microsoft's compiler does
 #
 # Then: make, make deploy, make run.
 
@@ -41,6 +44,7 @@ endif
 XEX_TITLE ?= title
 XEX_BASE  ?= 0x82000000
 XEX_STACK ?= 0x100000
+XEX_SYSFLAGS ?= 0x1
 # The title's id, from its xex.xml if it is a port of an XDK project. Left at zero a title
 # still runs, but everything the console keys by title id resolves to nothing: XContent
 # save packages, profiles, achievements. Saves then appear to succeed and are not there.
@@ -186,6 +190,23 @@ endif
 OXDK360_BASEFLAGS += -Xclang -target-feature -Xclang +xenon-abi
 endif
 
+# Bitfields. On this ELF target clang packs bitfields the SysV way, where a field may
+# share storage with a neighbour of a different type: struct { unsigned char a:4;
+# unsigned int b:4; } is 4 bytes. Microsoft's compiler starts a new unit whenever the
+# declared type changes, and that struct is 8 bytes there. Every XDK structure with
+# mixed-type bitfields, and anything passed to the XDK that embeds one, is laid out
+# wrong without -mms-bitfields.
+#
+# OXDK360_SDK_FLAGS is the set a unit that includes XDK headers and shares their
+# structures should use. It is not on by default because it also changes the layout of
+# a project's own bitfields; set OXDK360_MS_BITFIELDS=1 to compile everything with it,
+# or add $(OXDK360_SDK_FLAGS) to the units that talk to the XDK. (The XDK's
+# #pragma bitfield_order is still ignored either way: clang has no such pragma.)
+OXDK360_SDK_FLAGS := -mms-bitfields
+ifeq ($(OXDK360_MS_BITFIELDS),1)
+OXDK360_BASEFLAGS += $(OXDK360_SDK_FLAGS)
+endif
+
 # Include order decides which <vector> a C++ file gets: the first -isystem holding the
 # name wins, and the XDK ships its own copy of the whole C++ library. libc++ goes ahead
 # of the XDK directories, not after them, or every header resolves back to Microsoft's.
@@ -293,7 +314,8 @@ $(XEX): $(OBJS) $(OXDK360_DIR)/tools/cxex/cxex
 	python3 $(OXDK360_DIR)/tools/oxdklink/oxdklink.py $(OBJS) \
 	    -T $(LINKER_SCRIPT) -o $@ \
 	    --xdk "$(XDK_DIR)" --libs $(XDK_LIBS) \
-	    --base $(XEX_BASE) --stack $(XEX_STACK) --name $(XEX_TITLE).exe \
+	    --base $(XEX_BASE) --stack $(XEX_STACK) --sysflags $(XEX_SYSFLAGS) \
+	    --name $(XEX_TITLE).exe \
 	    --title-id $(XEX_TITLE_ID)
 
 $(OXDK360_DIR)/tools/cxex/cxex:

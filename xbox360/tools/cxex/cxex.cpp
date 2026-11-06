@@ -164,8 +164,21 @@ struct Config {
     std::vector<Section> sections;
     uint32_t base = 0x82000000;
     uint32_t entry = 0;
-    uint32_t stack = 0x40000;
+    // The main thread's stack. 1 MB is what imagexex gives a title that names none,
+    // and what xsdk measured the console handing the main thread.
+    uint32_t stack = 0x100000;
     uint32_t title_id = 0;
+    // System flags (XEX header 0x00030000), as the kernel and Xenia name them:
+    //   0x01 NO_FORCED_REBOOT           the title can return to the dashboard
+    //   0x02 FOREGROUND_TASKS           0x04 NO_ODD_MAPPING
+    //   0x08 HANDLE_MCE_INPUT           0x10 RESTRICTED_HUD_FEATURES
+    //   0x20 HANDLE_GAMEPAD_DISCONNECT  the title shows its own "reconnect your
+    //                                   controller" screen, so the system does not
+    //                                   put up its own over the game
+    //   0x40 INSECURE_SOCKETS
+    // Only NO_FORCED_REBOOT by default: a title that does not handle a lost
+    // controller is better served by the system's prompt. One that does sets
+    // "sysflags 0x21" in its manifest (oxdklink --sysflags, XEX_SYSFLAGS).
     uint32_t system_flags = 0x00000001;
     std::vector<Library> libs;
 };
@@ -195,7 +208,8 @@ uint32_t parse_version(const std::string &s) {
 // Manifest lines, one directive per line:
 //   base 0x82000000
 //   entry 0x82001000
-//   stack 0x40000
+//   stack 0x100000        (default 1 MB; a multiple of 4 KB, at least 64 KB)
+//   sysflags 0x21         (default 0x1; see Config::system_flags)
 //   titleid 0xFFFE07D1
 //   pename default.exe
 //   library xboxkrnl.exe 2.0.21256.0
@@ -397,8 +411,20 @@ void synth_pe(std::vector<uint8_t> &img, const Config &cfg, uint32_t image_size)
         exit(1);
     }
 
-    img[0] = 'M'; img[1] = 'Z';
+    // Microsoft's DOS header and stub, as in every XEX the SDK ships. The console
+    // reads only "MZ" and e_lfanew, but Xenia loads an image only when it starts
+    // "MZ", 0x90, 0 (XexModule::is_valid_executable), so a bare "MZ" is refused.
+    static const uint8_t kDosHeader[0x3c] = {
+        'M', 'Z', 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0x00, 0x00, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    static const char kDosStub[] =
+        "\x0e\x1f\xba\x0e\x00\xb4\x09\xcd\x21\xb8\x01\x4c\xcd\x21"
+        "This program cannot be run in DOS mode.\r\r\n$";
+    std::copy(kDosHeader, kDosHeader + sizeof kDosHeader, img.begin());
     set32(img, 0x3c, uint32_t(pe));
+    std::fill(img.begin() + 0x40, img.begin() + pe, 0);
+    std::copy(kDosStub, kDosStub + sizeof kDosStub - 1, img.begin() + 0x40);
 
     img[pe] = 'P'; img[pe + 1] = 'E';
     set16(img, pe + 4, 0x01F2);                            // IMAGE_FILE_MACHINE_POWERPCBE
@@ -1010,6 +1036,14 @@ int main(int argc, char **argv) {
     parse_manifest(manifest, cfg);
     if (!cfg.entry) {
         fprintf(stderr, "cxex: manifest has no entry point\n");
+        return 1;
+    }
+    // The kernel rounds the stack to pages; a value under 64 KB is a typo (a size in
+    // KB, say) far more often than a choice, and a main thread that small overflows
+    // into whatever lies below it without any message.
+    if (cfg.stack < 0x10000 || (cfg.stack & 0xFFF)) {
+        fprintf(stderr, "cxex: stack 0x%x must be a multiple of 0x1000 and at least "
+                        "0x10000\n", cfg.stack);
         return 1;
     }
     return build(cfg);
