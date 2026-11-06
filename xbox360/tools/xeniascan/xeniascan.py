@@ -29,7 +29,8 @@ failure.
 
 The instruction lists come from reading Xenia's ppc_emit_*.cc for the emitters
 that reach XEINSTRNOTIMPLEMENTED, in xenia-canary (canary_experimental) and
-xenia-project (master) as of November 2026. Re-check them when Xenia moves.
+xenia-project (master) as of November 2026, plus canary's mcrf before it was
+fixed (it ran, but wrote the wrong field). Re-check them when Xenia moves.
 """
 import argparse
 import fnmatch
@@ -67,9 +68,16 @@ VMX_VX = {8: 'vmuloub', 72: 'vmulouh', 264: 'vmulosb', 328: 'vmulosh',
 
 PROFILES = {
     # xenia-canary implements mcrf, rldic, mcrfs, mffs., the VSCR moves, vpkpx
-    # and addeo that master does not.
+    # and addeo that master does not. 'skip' lists what a profile gets right.
     'canary': {
         'skip': {'mcrf', 'rldic', 'mcrfs', 'mffs.', 'mfvscr', 'mtvscr', 'vpkpx', 'addeo'},
+    },
+    # Canary before 577fb8e (2026-09-04, "Fix mcrf: copy the CR field instead of
+    # comparing it against zero"): its mcrf set the destination field from a
+    # signed compare of the source field's value, so the field read back later is
+    # wrong. Builds such as 02d2cb5 (March 2026) still have it.
+    'canary-old': {
+        'skip': {'rldic', 'mcrfs', 'mffs.', 'mfvscr', 'mtvscr', 'vpkpx', 'addeo'},
     },
     'master': {
         'skip': set(),
@@ -339,7 +347,9 @@ def main():
                                  epilog=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('title', help="oxdklink's linked ELF, or an unencrypted XEX")
     ap.add_argument('--xenia', choices=sorted(PROFILES), default='canary',
-                    help="which Xenia's gaps to check against (default canary)")
+                    help="which Xenia's gaps to check against: canary (577fb8e, "
+                         "2026-09-04, or newer), canary-old (older canary, whose mcrf is "
+                         "wrong) or master (default canary)")
     ap.add_argument('--only', action='append', default=[],
                     help="limit to functions matching this pattern (repeatable)")
     ap.add_argument('--no-overrun', action='store_true', help="skip the function end check")
