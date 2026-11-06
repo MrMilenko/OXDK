@@ -1,0 +1,359 @@
+diff --git a/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp b/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp
+index 125f85cc4..648d990fe 100644
+--- a/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp
++++ b/llvm/lib/Target/PowerPC/PPCFrameLowering.cpp
+@@ -61,8 +61,9 @@ static unsigned computeTOCSaveOffset(const PPCSubtarget &STI) {
+ }
+ 
+ static unsigned computeFramePointerSaveOffset(const PPCSubtarget &STI) {
+-  // First slot in the general register save area.
+-  return STI.isPPC64() ? -8U : -4U;
++  // First slot in the general register save area. Xenon keeps nonvolatile GPRs
++  // as doublewords, so its slots are eight bytes apart as on PPC64.
++  return (STI.isPPC64() || STI.isXenonABI()) ? -8U : -4U;
+ }
+ 
+ static unsigned computeLinkageSize(const PPCSubtarget &STI) {
+@@ -78,18 +79,93 @@ static unsigned computeLinkageSize(const PPCSubtarget &STI) {
+ }
+ 
+ static unsigned computeBasePointerSaveOffset(const PPCSubtarget &STI) {
++  const bool Wide = STI.isPPC64() || STI.isXenonABI();
+   // Third slot in the general purpose register save area.
+   if (STI.is32BitELFABI() && STI.getTargetMachine().isPositionIndependent())
+-    return -12U;
++    return Wide ? -24U : -12U;
+ 
+   // Second slot in the general purpose register save area.
+-  return STI.isPPC64() ? -16U : -8U;
++  return Wide ? -16U : -8U;
+ }
+ 
+ static unsigned computeCRSaveOffset(const PPCSubtarget &STI) {
+   return (STI.isAIXABI() && !STI.isPPC64()) ? 4 : 8;
+ }
+ 
++// Microsoft's Xbox 360 compiler treats all 64 bits of r14-r31 as nonvolatile,
++// even in titles with 32 bit pointers, and its code keeps 64 bit integers in
++// them across calls. A Xenon save or restore of one of them therefore moves the
++// whole doubleword (std/ld on the containing X register); a word store would
++// hand the caller back a zero upper half.
++static bool isXenonWideGPR(const PPCSubtarget &STI, MCRegister Reg) {
++  return STI.isXenonABI() && !STI.isPPC64() &&
++         PPC::GPRCRegClass.contains(Reg) && Reg != PPC::ZERO;
++}
++
++static MCRegister getXenonWideGPR(const PPCSubtarget &STI, MCRegister Reg) {
++  return STI.getRegisterInfo()->getMatchingSuperReg(Reg, PPC::sub_32,
++                                                    &PPC::G8RCRegClass);
++}
++
++// Save GPR Reg at Off(Base) in the prologue: stw normally, std of the whole
++// register under Xenon. The X register is an undef use because a 32 bit
++// subtarget models only its low word; the implicit use of Reg keeps the store
++// after the last write of the register it saves.
++static void buildGPRSave(const PPCSubtarget &STI, MachineBasicBlock &MBB,
++                         MachineBasicBlock::iterator MBBI, const DebugLoc &dl,
++                         const MCInstrDesc &StoreInst, MCRegister Reg,
++                         unsigned KillFlag, int64_t Off, MCRegister Base) {
++  const PPCInstrInfo &TII = *STI.getInstrInfo();
++  if (!isXenonWideGPR(STI, Reg)) {
++    BuildMI(MBB, MBBI, dl, StoreInst)
++        .addReg(Reg, KillFlag)
++        .addImm(Off)
++        .addReg(Base);
++    return;
++  }
++  BuildMI(MBB, MBBI, dl, TII.get(PPC::STD))
++      .addReg(getXenonWideGPR(STI, Reg), RegState::Undef)
++      .addImm(Off)
++      .addReg(Base)
++      .addReg(Reg, RegState::Implicit | KillFlag);
++}
++
++// The same through stwx/stdx, for a base that has to be an index register.
++static void buildGPRSaveIdx(const PPCSubtarget &STI, MachineBasicBlock &MBB,
++                            MachineBasicBlock::iterator MBBI,
++                            const DebugLoc &dl, MCRegister Reg,
++                            MCRegister Index) {
++  const PPCInstrInfo &TII = *STI.getInstrInfo();
++  if (!isXenonWideGPR(STI, Reg)) {
++    BuildMI(MBB, MBBI, dl, TII.get(PPC::STWX))
++        .addReg(Reg, RegState::Kill)
++        .addReg(PPC::ZERO)
++        .addReg(Index);
++    return;
++  }
++  BuildMI(MBB, MBBI, dl, TII.get(PPC::STDX))
++      .addReg(getXenonWideGPR(STI, Reg), RegState::Undef)
++      .addReg(PPC::ZERO)
++      .addReg(Index)
++      .addReg(Reg, RegState::Implicit | RegState::Kill);
++}
++
++// Restore GPR Dst from Off(Base) in the epilogue: lwz normally, ld of the
++// whole register under Xenon.
++static void buildGPRRestore(const PPCSubtarget &STI, MachineBasicBlock &MBB,
++                            MachineBasicBlock::iterator MBBI,
++                            const DebugLoc &dl, const MCInstrDesc &LoadInst,
++                            MCRegister Dst, int64_t Off, MCRegister Base) {
++  const PPCInstrInfo &TII = *STI.getInstrInfo();
++  if (!isXenonWideGPR(STI, Dst)) {
++    BuildMI(MBB, MBBI, dl, LoadInst, Dst).addImm(Off).addReg(Base);
++    return;
++  }
++  BuildMI(MBB, MBBI, dl, TII.get(PPC::LD), getXenonWideGPR(STI, Dst))
++      .addImm(Off)
++      .addReg(Base);
++}
++
+ PPCFrameLowering::PPCFrameLowering(const PPCSubtarget &STI)
+     : TargetFrameLowering(TargetFrameLowering::StackGrowsDown,
+                           STI.getPlatformStackAlignment(), 0),
+@@ -221,6 +297,32 @@ const PPCFrameLowering::SpillSlot *PPCFrameLowering::getCalleeSavedSpillSlots(
+       {PPC::S15, -136},
+       {PPC::S14, -144}};
+ 
++  // Xenon: 32 bit pointers, but Microsoft's code keeps all 64 bits of r14-r31
++  // across a call, so each saved GPR takes a doubleword slot as on PPC64.
++  static const SpillSlot XenonOffsets32[] = {
++      CALLEE_SAVED_FPRS,
++      {PPC::R31, -8},
++      {PPC::R30, -16},
++      {PPC::R29, -24},
++      {PPC::R28, -32},
++      {PPC::R27, -40},
++      {PPC::R26, -48},
++      {PPC::R25, -56},
++      {PPC::R24, -64},
++      {PPC::R23, -72},
++      {PPC::R22, -80},
++      {PPC::R21, -88},
++      {PPC::R20, -96},
++      {PPC::R19, -104},
++      {PPC::R18, -112},
++      {PPC::R17, -120},
++      {PPC::R16, -128},
++      {PPC::R15, -136},
++      {PPC::R14, -144},
++      {PPC::CR2, -4},
++      {PPC::VRSAVE, -4},
++      CALLEE_SAVED_VRS};
++
+   static const SpillSlot ELFOffsets64[] = {
+       CALLEE_SAVED_FPRS,
+       CALLEE_SAVED_GPRS64,
+@@ -244,6 +346,11 @@ const PPCFrameLowering::SpillSlot *PPCFrameLowering::getCalleeSavedSpillSlots(
+     return ELFOffsets64;
+   }
+ 
++  if (Subtarget.isXenonABI()) {
++    NumEntries = std::size(XenonOffsets32);
++    return XenonOffsets32;
++  }
++
+   if (Subtarget.is32BitELFABI()) {
+     NumEntries = std::size(ELFOffsets32);
+     return ELFOffsets32;
+@@ -833,20 +940,14 @@ void PPCFrameLowering::emitPrologue(MachineFunction &MF,
+ 
+   if (HasRedZone) {
+     if (HasFP)
+-      BuildMI(MBB, MBBI, dl, StoreInst)
+-        .addReg(FPReg)
+-        .addImm(FPOffset)
+-        .addReg(SPReg);
++      buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, FPReg, 0,
++        FPOffset, SPReg);
+     if (FI->usesPICBase())
+-      BuildMI(MBB, MBBI, dl, StoreInst)
+-        .addReg(PPC::R30)
+-        .addImm(PBPOffset)
+-        .addReg(SPReg);
++      buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, PPC::R30, 0,
++        PBPOffset, SPReg);
+     if (HasBP)
+-      BuildMI(MBB, MBBI, dl, StoreInst)
+-        .addReg(BPReg)
+-        .addImm(BPOffset)
+-        .addReg(SPReg);
++      buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, BPReg, 0,
++        BPOffset, SPReg);
+   }
+ 
+   // Generate the instruction to store the LR. In the case where ROP protection
+@@ -1028,10 +1129,7 @@ void PPCFrameLowering::emitPrologue(MachineFunction &MF,
+             .addImm(FPOffset-LastOffset);
+           LastOffset = FPOffset;
+           // Store FP into *R0.
+-          BuildMI(MBB, MBBI, dl, TII.get(PPC::STWX))
+-            .addReg(FPReg, RegState::Kill)  // Save FP.
+-            .addReg(PPC::ZERO)
+-            .addReg(ScratchReg);  // This will be the index (R0 is ok here).
++          buildGPRSaveIdx(Subtarget, MBB, MBBI, dl, FPReg, ScratchReg);
+         }
+         if (FI->usesPICBase()) {
+           // R0 += (PBPOffset-LastOffset).
+@@ -1039,10 +1137,7 @@ void PPCFrameLowering::emitPrologue(MachineFunction &MF,
+             .addReg(ScratchReg)
+             .addImm(PBPOffset-LastOffset);
+           LastOffset = PBPOffset;
+-          BuildMI(MBB, MBBI, dl, TII.get(PPC::STWX))
+-            .addReg(PPC::R30, RegState::Kill)  // Save PIC base pointer.
+-            .addReg(PPC::ZERO)
+-            .addReg(ScratchReg);  // This will be the index (R0 is ok here).
++          buildGPRSaveIdx(Subtarget, MBB, MBBI, dl, PPC::R30, ScratchReg);
+         }
+         if (HasBP) {
+           // R0 += (BPOffset-LastOffset).
+@@ -1050,10 +1145,7 @@ void PPCFrameLowering::emitPrologue(MachineFunction &MF,
+             .addReg(ScratchReg)
+             .addImm(BPOffset-LastOffset);
+           LastOffset = BPOffset;
+-          BuildMI(MBB, MBBI, dl, TII.get(PPC::STWX))
+-            .addReg(BPReg, RegState::Kill)  // Save BP.
+-            .addReg(PPC::ZERO)
+-            .addReg(ScratchReg);  // This will be the index (R0 is ok here).
++          buildGPRSaveIdx(Subtarget, MBB, MBBI, dl, BPReg, ScratchReg);
+           // BP = R0-LastOffset
+           BuildMI(MBB, MBBI, dl, TII.get(PPC::ADDIC), BPReg)
+             .addReg(ScratchReg, RegState::Kill)
+@@ -1066,20 +1158,14 @@ void PPCFrameLowering::emitPrologue(MachineFunction &MF,
+         // Now that the stack frame has been allocated, save all the necessary
+         // registers using ScratchReg as the base address.
+         if (HasFP)
+-          BuildMI(MBB, MBBI, dl, StoreInst)
+-            .addReg(FPReg)
+-            .addImm(FPOffset)
+-            .addReg(ScratchReg);
++          buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, FPReg, 0,
++            FPOffset, ScratchReg);
+         if (FI->usesPICBase())
+-          BuildMI(MBB, MBBI, dl, StoreInst)
+-            .addReg(PPC::R30)
+-            .addImm(PBPOffset)
+-            .addReg(ScratchReg);
++          buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, PPC::R30, 0,
++            PBPOffset, ScratchReg);
+         if (HasBP) {
+-          BuildMI(MBB, MBBI, dl, StoreInst)
+-            .addReg(BPReg)
+-            .addImm(BPOffset)
+-            .addReg(ScratchReg);
++          buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, BPReg, 0,
++            BPOffset, ScratchReg);
+           BuildMI(MBB, MBBI, dl, OrInst, BPReg)
+             .addReg(ScratchReg, RegState::Kill)
+             .addReg(ScratchReg);
+@@ -1091,20 +1177,14 @@ void PPCFrameLowering::emitPrologue(MachineFunction &MF,
+       // Since the SPReg has been decreased by FrameSize, add it back to each
+       // offset.
+       if (HasFP)
+-        BuildMI(MBB, MBBI, dl, StoreInst)
+-          .addReg(FPReg)
+-          .addImm(FrameSize + FPOffset)
+-          .addReg(SPReg);
++        buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, FPReg, 0,
++          FrameSize + FPOffset, SPReg);
+       if (FI->usesPICBase())
+-        BuildMI(MBB, MBBI, dl, StoreInst)
+-          .addReg(PPC::R30)
+-          .addImm(FrameSize + PBPOffset)
+-          .addReg(SPReg);
++        buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, PPC::R30, 0,
++          FrameSize + PBPOffset, SPReg);
+       if (HasBP) {
+-        BuildMI(MBB, MBBI, dl, StoreInst)
+-          .addReg(BPReg)
+-          .addImm(FrameSize + BPOffset)
+-          .addReg(SPReg);
++        buildGPRSave(Subtarget, MBB, MBBI, dl, StoreInst, BPReg, 0,
++          FrameSize + BPOffset, SPReg);
+         BuildMI(MBB, MBBI, dl, TII.get(PPC::ADDI), BPReg)
+           .addReg(SPReg)
+           .addImm(FrameSize);
+@@ -1820,24 +1900,20 @@ void PPCFrameLowering::emitEpilogue(MachineFunction &MF,
+     // If there is red zone, restore FP directly, since SP has already been
+     // restored. Otherwise, restore the value of FP into ScratchReg.
+     if (HasRedZone || RBReg == SPReg)
+-      BuildMI(MBB, MBBI, dl, LoadInst, FPReg)
+-        .addImm(FPOffset)
+-        .addReg(SPReg);
++      buildGPRRestore(Subtarget, MBB, MBBI, dl, LoadInst, FPReg,
++        FPOffset, SPReg);
+     else
+-      BuildMI(MBB, MBBI, dl, LoadInst, ScratchReg)
+-        .addImm(FPOffset)
+-        .addReg(RBReg);
++      buildGPRRestore(Subtarget, MBB, MBBI, dl, LoadInst, ScratchReg,
++        FPOffset, RBReg);
+   }
+ 
+   if (FI->usesPICBase())
+-    BuildMI(MBB, MBBI, dl, LoadInst, PPC::R30)
+-      .addImm(PBPOffset)
+-      .addReg(RBReg);
++    buildGPRRestore(Subtarget, MBB, MBBI, dl, LoadInst, PPC::R30,
++      PBPOffset, RBReg);
+ 
+   if (HasBP)
+-    BuildMI(MBB, MBBI, dl, LoadInst, BPReg)
+-      .addImm(BPOffset)
+-      .addReg(RBReg);
++    buildGPRRestore(Subtarget, MBB, MBBI, dl, LoadInst, BPReg,
++      BPOffset, RBReg);
+ 
+   // There is nothing more to be loaded from the stack, so now we can
+   // restore SP: SP = RBReg + SPAdd.
+@@ -2029,7 +2105,8 @@ void PPCFrameLowering::determineCalleeSaves(MachineFunction &MF,
+   // Reserve stack space for the PIC Base register (R30).
+   // Only used in SVR4 32-bit.
+   if (FI->usesPICBase()) {
+-    int PBPSI = MFI.CreateFixedObject(4, -8, true);
++    int PBPSI = MFI.CreateFixedObject(4, Subtarget.isXenonABI() ? -16 : -8,
++                                      true);
+     FI->setPICBasePointerSaveIndex(PBPSI);
+   }
+ 
+@@ -2271,7 +2348,8 @@ void PPCFrameLowering::processFunctionBeforeFrameFinalized(MachineFunction &MF,
+       std::min<unsigned>(TRI->getEncodingValue(MinGPR),
+                          TRI->getEncodingValue(MinG8R));
+ 
+-    const unsigned GPRegSize = Subtarget.isPPC64() ? 8 : 4;
++    const unsigned GPRegSize =
++        (Subtarget.isPPC64() || Subtarget.isXenonABI()) ? 8 : 4;
+     LowerBound -= (31 - MinReg + 1) * GPRegSize;
+   }
+ 
+@@ -2549,8 +2627,14 @@ bool PPCFrameLowering::spillCalleeSavedRegisters(
+         // before their use because they will become undefined registers.
+         // Functions without NoUnwind need to preserve the order of elements in
+         // saved vector registers.
+-        if (Subtarget.needsSwapsForVSXMemOps() &&
+-            !MF->getFunction().hasFnAttribute(Attribute::NoUnwind))
++        if (isXenonWideGPR(Subtarget, Reg))
++          addFrameReference(
++              BuildMI(MBB, MI, DL, TII.get(PPC::STD))
++                  .addReg(getXenonWideGPR(Subtarget, Reg), RegState::Undef),
++              I.getFrameIdx())
++              .addReg(Reg, RegState::Implicit | getKillRegState(!IsLiveIn));
++        else if (Subtarget.needsSwapsForVSXMemOps() &&
++                 !MF->getFunction().hasFnAttribute(Attribute::NoUnwind))
+           TII.storeRegToStackSlotNoUpd(MBB, MI, Reg, !IsLiveIn, I.getFrameIdx(),
+                                        RC);
+         else
+@@ -2719,8 +2803,12 @@ bool PPCFrameLowering::restoreCalleeSavedRegisters(
+ 
+         // Functions without NoUnwind need to preserve the order of elements in
+         // saved vector registers.
+-        if (Subtarget.needsSwapsForVSXMemOps() &&
+-            !MF->getFunction().hasFnAttribute(Attribute::NoUnwind))
++        if (isXenonWideGPR(Subtarget, Reg))
++          addFrameReference(BuildMI(MBB, I, DebugLoc(), TII.get(PPC::LD),
++                                    getXenonWideGPR(Subtarget, Reg)),
++                            CSI[i].getFrameIdx());
++        else if (Subtarget.needsSwapsForVSXMemOps() &&
++                 !MF->getFunction().hasFnAttribute(Attribute::NoUnwind))
+           TII.loadRegFromStackSlotNoUpd(MBB, I, Reg, CSI[i].getFrameIdx(), RC);
+         else
+           TII.loadRegFromStackSlot(MBB, I, Reg, CSI[i].getFrameIdx(), RC,
