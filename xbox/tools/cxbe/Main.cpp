@@ -9,7 +9,42 @@
 #include "Exe.h"
 #include "Xbe.h"
 
+#include <stdlib.h>
 #include <string.h>
+
+// a whole file's bytes; false if it can't be opened or read or is empty
+static bool ReadWholeFile(const char *path, std::vector<uint08> &bytes)
+{
+    FILE *file = fopen(path, "rb");
+    if(file == NULL)
+        return false;
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    bool ok = false;
+    if(size > 0)
+    {
+        bytes.resize((size_t)size);
+        ok = fread(&bytes[0], 1, (size_t)size, file) == (size_t)size;
+    }
+    fclose(file);
+    return ok;
+}
+
+// a 32-bit number in hex ("43480001" or "0x43480001"); false if it isn't one
+static bool ParseHex32(const char *text, uint32 *value)
+{
+    char *end = NULL;
+    unsigned long parsed;
+
+    if(text[0] == '\0')
+        return false;
+    parsed = strtoul(text, &end, 16);
+    if(end == NULL || *end != '\0' || parsed > 0xFFFFFFFFUL)
+        return false;
+    *value = (uint32)parsed;
+    return true;
+}
 
 // program entry point
 int main(int argc, char *argv[])
@@ -24,6 +59,11 @@ int main(int argc, char *argv[])
     char szTitleImage[OPTION_LEN + 1] = "";
     char szDebugPath[OPTION_LEN + 1] = "";
     char szLimit64MB[OPTION_LEN + 1] = "yes";
+    char szTitleId[OPTION_LEN + 1] = "";
+    char szAltTitleIds[OPTION_LEN + 1] = "";
+    char szRatings[OPTION_LEN + 1] = "";
+    char szSaveImage[OPTION_LEN + 1] = "";
+    Xbe::CertificateOptions certificate;
     bool bRetail;
     bool bLimit64MB;
 
@@ -34,7 +74,9 @@ int main(int argc, char *argv[])
         { szDumpFilename, "DUMPINFO", "filename" }, { szXbeTitle, "TITLE", "title" },
         { szMode, "MODE", "{debug|retail}" },       { szLogo, "LOGO", "filename" },
         { szTitleImage, "TITLEIMAGE", "filename" }, { szDebugPath, "DEBUGPATH", "path" },
-        { szLimit64MB, "LIMIT64MB", "{yes|no}" },
+        { szLimit64MB, "LIMIT64MB", "{yes|no}" },   { szTitleId, "TITLEID", "hex" },
+        { szAltTitleIds, "ALTTITLEID", "hex[,hex...]" }, { szRatings, "RATINGS", "hex" },
+        { szSaveImage, "SAVEIMAGE", "filename" },
         { NULL }
     };
 
@@ -60,6 +102,34 @@ int main(int argc, char *argv[])
     else
     {
         strncpy(szErrorMessage, "invalid LIMIT64MB", ERROR_LEN);
+        goto cleanup;
+    }
+
+    if(szTitleId[0] != '\0' && !ParseHex32(szTitleId, &certificate.dwTitleId))
+    {
+        strncpy(szErrorMessage, "invalid TITLEID (a hex number, e.g. 43480001)", ERROR_LEN);
+        goto cleanup;
+    }
+
+    if(szAltTitleIds[0] != '\0')
+    {
+        char *id = strtok(szAltTitleIds, ",");
+        while(id != NULL)
+        {
+            uint32 value;
+            if(!ParseHex32(id, &value) || certificate.alternateTitleIds.size() >= 0x10)
+            {
+                strncpy(szErrorMessage, "invalid ALTTITLEID (up to 16 hex numbers, comma separated)", ERROR_LEN);
+                goto cleanup;
+            }
+            certificate.alternateTitleIds.push_back(value);
+            id = strtok(NULL, ",");
+        }
+    }
+
+    if(szRatings[0] != '\0' && !ParseHex32(szRatings, &certificate.dwGameRatings))
+    {
+        strncpy(szErrorMessage, "invalid RATINGS (a hex number, e.g. 2 for M)", ERROR_LEN);
         goto cleanup;
     }
 
@@ -112,31 +182,29 @@ int main(int argc, char *argv[])
         std::vector<uint08> *TitleImagePtr = nullptr;
         if(szTitleImage[0] != '\0')
         {
-            FILE *ti = fopen(szTitleImage, "rb");
-            if(ti == NULL)
-            {
-                strncpy(szErrorMessage, "Unable to open TITLEIMAGE file", ERROR_LEN);
-                goto cleanup;
-            }
-            fseek(ti, 0, SEEK_END);
-            long tiSize = ftell(ti);
-            fseek(ti, 0, SEEK_SET);
-            if(tiSize > 0)
-            {
-                titleImage.resize((size_t)tiSize);
-                if(fread(&titleImage[0], 1, (size_t)tiSize, ti) == (size_t)tiSize)
-                    TitleImagePtr = &titleImage;
-            }
-            fclose(ti);
-            if(TitleImagePtr == nullptr)
+            if(!ReadWholeFile(szTitleImage, titleImage))
             {
                 strncpy(szErrorMessage, "Unable to read TITLEIMAGE file", ERROR_LEN);
                 goto cleanup;
             }
+            TitleImagePtr = &titleImage;
+        }
+
+        // Optional dashboard save image: the raw bytes of a SaveImage.xbx XPR,
+        // embedded as a $$XSIMAGE section (XAPI writes it beside a save)
+        std::vector<uint08> saveImage;
+        if(szSaveImage[0] != '\0')
+        {
+            if(!ReadWholeFile(szSaveImage, saveImage))
+            {
+                strncpy(szErrorMessage, "Unable to read SAVEIMAGE file", ERROR_LEN);
+                goto cleanup;
+            }
+            certificate.saveImage = &saveImage;
         }
 
         Xbe *XbeFile =
-            new Xbe(ExeFile, szXbeTitle, bRetail, LogoPtr, szDebugPath, TitleImagePtr, bLimit64MB);
+            new Xbe(ExeFile, szXbeTitle, bRetail, LogoPtr, szDebugPath, TitleImagePtr, bLimit64MB, &certificate);
 
         if(XbeFile->GetError() != 0)
         {
