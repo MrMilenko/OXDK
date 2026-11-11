@@ -60,8 +60,8 @@ CXBE = $(OXDK_XBOX_DIR)/tools/cxbe/cxbe
 CXBE_FLAGS = $(if $(XBE_TITLEID),-TITLEID:$(XBE_TITLEID)) \
 	$(if $(XBE_ALTTITLEID),-ALTTITLEID:$(XBE_ALTTITLEID)) \
 	$(if $(XBE_RATINGS),-RATINGS:$(XBE_RATINGS)) \
-	$(if $(XBE_TITLEIMAGE),-TITLEIMAGE:$(XBE_TITLEIMAGE)) \
-	$(if $(XBE_SAVEIMAGE),-SAVEIMAGE:$(XBE_SAVEIMAGE))
+	$(if $(XBE_TITLEIMAGE),-TITLEIMAGE:"$(XBE_TITLEIMAGE)") \
+	$(if $(XBE_SAVEIMAGE),-SAVEIMAGE:"$(XBE_SAVEIMAGE)")
 
 # Modern C++ stdlib (libc++) is opt-in via OXDK_LIBCXX=1. The XDK's own STL is
 # C++98, so C++11+ apps need libc++. That requires a newer MSVC-compat version

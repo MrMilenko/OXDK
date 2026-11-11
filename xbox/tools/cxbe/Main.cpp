@@ -31,18 +31,35 @@ static bool ReadWholeFile(const char *path, std::vector<uint08> &bytes)
     return ok;
 }
 
-// a 32-bit number in hex ("43480001" or "0x43480001"); false if it isn't one
+// a 32-bit number in hex ("43480001" or "0x43480001"): hex digits only, no
+// spaces or sign, at most 8 of them; false if it isn't one
 static bool ParseHex32(const char *text, uint32 *value)
 {
-    char *end = NULL;
-    unsigned long parsed;
+    uint32 parsed = 0;
+    int digits = 0;
 
-    if(text[0] == '\0')
+    if(text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        text += 2;
+    for(; *text != '\0'; text++, digits++)
+    {
+        char c = *text;
+        uint32 nibble;
+
+        if(c >= '0' && c <= '9')
+            nibble = (uint32)(c - '0');
+        else if(c >= 'a' && c <= 'f')
+            nibble = (uint32)(c - 'a' + 10);
+        else if(c >= 'A' && c <= 'F')
+            nibble = (uint32)(c - 'A' + 10);
+        else
+            return false;
+        if(digits == 8)
+            return false;
+        parsed = (parsed << 4) | nibble;
+    }
+    if(digits == 0)
         return false;
-    parsed = strtoul(text, &end, 16);
-    if(end == NULL || *end != '\0' || parsed > 0xFFFFFFFFUL)
-        return false;
-    *value = (uint32)parsed;
+    *value = parsed;
     return true;
 }
 
@@ -105,9 +122,9 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    if(szTitleId[0] != '\0' && !ParseHex32(szTitleId, &certificate.dwTitleId))
+    if(szTitleId[0] != '\0' && (!ParseHex32(szTitleId, &certificate.dwTitleId) || certificate.dwTitleId == 0))
     {
-        strncpy(szErrorMessage, "invalid TITLEID (a hex number, e.g. 43480001)", ERROR_LEN);
+        strncpy(szErrorMessage, "invalid TITLEID (a hex number other than 0, e.g. 43480001)", ERROR_LEN);
         goto cleanup;
     }
 
@@ -117,7 +134,7 @@ int main(int argc, char *argv[])
         while(id != NULL)
         {
             uint32 value;
-            if(!ParseHex32(id, &value) || certificate.alternateTitleIds.size() >= 0x10)
+            if(!ParseHex32(id, &value) || value == 0 || certificate.alternateTitleIds.size() >= 0x10)
             {
                 strncpy(szErrorMessage, "invalid ALTTITLEID (up to 16 hex numbers, comma separated)", ERROR_LEN);
                 goto cleanup;
