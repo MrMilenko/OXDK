@@ -11,6 +11,15 @@
 #   XBE_LIMIT64MB - yes or no, default yes. Set to no to let the title use all
 #                 128 MB on an upgraded console or a devkit. Stock hardware has
 #                 64 MB either way, so no is safe there too.
+#   XBE_TITLEID - the certificate's title ID in hex (default: cxbe's 0xFFFF0002,
+#                 which every title that keeps it shares: saves and the Z:
+#                 cache partition). Pick your own; never a retail game's.
+#   XBE_ALTTITLEID - alternate title IDs in hex, comma separated (an old ID
+#                 whose saves the title may still mount)
+#   XBE_RATINGS - the game rating in hex (the dashboard's parental control;
+#                 default unrated, 0xFFFFFFFF)
+#   XBE_TITLEIMAGE - a TitleImage.xbx (XPR) embedded as $$XTIMAGE
+#   XBE_SAVEIMAGE - a SaveImage.xbx (XPR) embedded as $$XSIMAGE
 
 ifeq ($(OXDK_XBOX_DIR),)
 $(error OXDK_DIR must be set to the OXDK directory)
@@ -48,6 +57,11 @@ OUTPUT_DIR ?= bin
 endif
 
 CXBE = $(OXDK_XBOX_DIR)/tools/cxbe/cxbe
+CXBE_FLAGS = $(if $(XBE_TITLEID),-TITLEID:$(XBE_TITLEID)) \
+	$(if $(XBE_ALTTITLEID),-ALTTITLEID:$(XBE_ALTTITLEID)) \
+	$(if $(XBE_RATINGS),-RATINGS:$(XBE_RATINGS)) \
+	$(if $(XBE_TITLEIMAGE),-TITLEIMAGE:"$(XBE_TITLEIMAGE)") \
+	$(if $(XBE_SAVEIMAGE),-SAVEIMAGE:"$(XBE_SAVEIMAGE)")
 
 # Modern C++ stdlib (libc++) is opt-in via OXDK_LIBCXX=1. The XDK's own STL is
 # C++98, so C++11+ apps need libc++. That requires a newer MSVC-compat version
@@ -192,7 +206,7 @@ normalize-xdk:
 	$(OXDK_XBOX_DIR)/tools/normalize-xdk.sh $(XDK_DIR)
 
 $(OUTPUT_DIR)/default.xbe: $(OUTPUT_DIR)/$(XBE_TITLE).exe $(CXBE)
-	$(CXBE) -MODE:$(XBE_MODE) -TITLE:"$(XBE_NAME)" -LIMIT64MB:$(XBE_LIMIT64MB) -OUT:$@ $<
+	$(CXBE) -MODE:$(XBE_MODE) -TITLE:"$(XBE_NAME)" -LIMIT64MB:$(XBE_LIMIT64MB) $(CXBE_FLAGS) -OUT:$@ $<
 
 $(OUTPUT_DIR)/$(XBE_TITLE).exe: $(OBJS)
 	$(LLD_LINK) $(OXDK_LDFLAGS) $(OXDK_KERNEL_IMPORTS) $(OXDK_CRT_HELPERS) $(LDFLAGS) \

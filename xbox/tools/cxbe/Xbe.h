@@ -26,9 +26,21 @@ class Xbe : public Error
 {
   public:
     // construct via Exe file object
+    // certificate values a title may set; the defaults are cxbe's own
+    struct CertificateOptions
+    {
+        uint32 dwTitleId = 0xFFFF0002;
+        // up to 16 alternate title ids (the saves of another id the title may mount)
+        std::vector<uint32> alternateTitleIds;
+        uint32 dwGameRatings = 0xFFFFFFFF;
+        // the dashboard's save image ($$XSIMAGE: the bytes of a SaveImage.xbx)
+        const std::vector<uint08> *saveImage = nullptr;
+    };
+
     Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail,
         const std::vector<uint08> *logo = nullptr, const char *x_szDebugPath = nullptr,
-        const std::vector<uint08> *x_TitleImage = nullptr, bool x_bLimit64MB = true);
+        const std::vector<uint08> *x_TitleImage = nullptr, bool x_bLimit64MB = true,
+        const CertificateOptions *x_Certificate = nullptr);
 
     // deconstructor
     ~Xbe();

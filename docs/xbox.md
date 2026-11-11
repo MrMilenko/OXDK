@@ -56,7 +56,15 @@ Useful ones:
 - `XBE_MODE`, `DEBUG` or `RETAIL`.
 - `XBE_LIMIT64MB`, `yes` by default. `no` lets a title use all 128 MB on an
   upgraded console or devkit. Stock hardware has 64 MB either way.
-- `XBE_TITLEIMAGE`, a `$$XTIMAGE` XPR embedded as the dashboard icon.
+- `XBE_TITLEIMAGE`, a `$$XTIMAGE` XPR embedded as the dashboard icon, and
+  `XBE_SAVEIMAGE`, a `$$XSIMAGE` XPR the dashboard shows beside saves.
+- `XBE_TITLEID`, the certificate's title ID in hex. cxbe's default,
+  0xFFFF0002, is shared by every title that keeps it: their saves sit in the
+  same UDATA folder and they share a Z: cache partition. Pick your own, never
+  a retail game's. `XBE_ALTTITLEID` lists older IDs whose saves the title
+  may still mount.
+- `XBE_RATINGS`, the game rating in hex for the dashboard's parental control
+  (unrated by default).
 - `OXDK_LIBCXX = 1`, use libc++ instead of the XDK's C++ library.
 
 ### Driving it yourself

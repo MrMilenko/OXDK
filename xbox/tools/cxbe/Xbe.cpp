@@ -33,7 +33,8 @@ static size_t BasenameOffset(const std::string &path)
 
 // construct via Exe file object
 Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vector<uint08> *logo,
-         const char *x_szDebugPath, const std::vector<uint08> *x_TitleImage, bool x_bLimit64MB)
+         const char *x_szDebugPath, const std::vector<uint08> *x_TitleImage, bool x_bLimit64MB,
+         const CertificateOptions *x_Certificate)
 {
     ConstructorInit();
 
@@ -44,12 +45,24 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
     printf("Xbe::Xbe: Pass 1 (Simple Pass)...");
     std::string debug_path = x_szDebugPath;
 
-    // Optional synthetic $$XTIMAGE section (the dashboard title image) appended
-    // after the PE-derived sections. exeSections counts the real sections; the
-    // title image, when present, is the last section.
+    const CertificateOptions defaultCertificate;
+    const CertificateOptions &certificate = x_Certificate ? *x_Certificate : defaultCertificate;
+
+    // Optional synthetic sections appended after the PE-derived sections: the
+    // dashboard's title image ($$XTIMAGE) and save image ($$XSIMAGE).
+    // exeSections counts the real sections; the synthetic ones follow, in
+    // this order.
+    struct SyntheticSection
+    {
+        const char *name;
+        const std::vector<uint08> *data;
+    };
+    std::vector<SyntheticSection> synthetic;
+    if(x_TitleImage != nullptr && !x_TitleImage->empty())
+        synthetic.push_back({ "$$XTIMAGE", x_TitleImage });
+    if(certificate.saveImage != nullptr && !certificate.saveImage->empty())
+        synthetic.push_back({ "$$XSIMAGE", certificate.saveImage });
     const uint32 exeSections = x_Exe->m_Header.m_sections;
-    const bool hasTitleImage = (x_TitleImage != nullptr && !x_TitleImage->empty());
-    static const char *const kTitleImageName = "$$XTIMAGE";
 
     // pass 1
     {
@@ -65,8 +78,8 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
         // this is a constant value
         m_Header.dwSizeofImageHeader = sizeof(m_Header);
 
-        // one XBE section per Exe section, plus the title image section if given
-        m_Header.dwSections = exeSections + (hasTitleImage ? 1 : 0);
+        // one XBE section per Exe section, plus the synthetic image sections
+        m_Header.dwSections = exeSections + (uint32)synthetic.size();
 
         // TODO: allow configuration
         {
@@ -151,9 +164,9 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
             // make room for section names
             for(uint32 v = 0; v < m_Header.dwSections; v++)
             {
-                if(hasTitleImage && v == exeSections)
+                if(v >= exeSections)
                 {
-                    mrc += strlen(kTitleImageName) + 1;
+                    mrc += strlen(synthetic[v - exeSections].name) + 1;
                     continue;
                 }
 
@@ -305,8 +318,8 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
 
             m_Certificate.dwTimeDate = CurrentTime;
 
-            // TODO: generate in the form CX-9999
-            m_Certificate.dwTitleId = 0xFFFF0002;
+            // cxbe's default 0xFFFF0002 unless the title names its own (-TITLEID)
+            m_Certificate.dwTitleId = certificate.dwTitleId;
 
             // title name
             memset(m_Certificate.wszTitleName, 0, sizeof(m_Certificate.wszTitleName));
@@ -322,7 +335,8 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
             // zero out alternate ids
             {
                 for(uint32 c = 0; c < 0x10; c++)
-                    m_Certificate.dwAlternateTitleId[c] = 0;
+                    m_Certificate.dwAlternateTitleId[c] =
+                        c < certificate.alternateTitleIds.size() ? certificate.alternateTitleIds[c] : 0;
             }
 
             // for now we'll just allow any media you could want
@@ -336,8 +350,8 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
                                          XBEIMAGE_GAME_REGION_NA | XBEIMAGE_GAME_REGION_JAPAN |
                                          XBEIMAGE_GAME_REGION_RESTOFWORLD;
 
-            // TODO: allow configuration
-            m_Certificate.dwGameRatings = 0xFFFFFFFF;
+            // 0xFFFFFFFF (unrated) unless the title gives its rating (-RATINGS)
+            m_Certificate.dwGameRatings = certificate.dwGameRatings;
 
             // always disk 0, AFAIK
             m_Certificate.dwDiskNumber = 0;
@@ -403,13 +417,14 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
             {
                 printf("Xbe::Xbe: Generating Section Header %.04X...", v);
 
-                // Synthetic $$XTIMAGE section: a plain data section (no preload,
-                // not executable) carrying the dashboard title image, appended in
-                // virtual space after the last PE section. Self contained so it
-                // skips the PE-driven logic below.
-                if(hasTitleImage && v == exeSections)
+                // Synthetic image section ($$XTIMAGE, $$XSIMAGE): a plain data
+                // section (no preload, not executable) carrying a dashboard
+                // image, appended in virtual space after the section before it.
+                // Self contained so it skips the PE-driven logic below.
+                if(v >= exeSections)
                 {
-                    uint32 tiSize = (uint32)x_TitleImage->size();
+                    const SyntheticSection &section = synthetic[v - exeSections];
+                    uint32 tiSize = (uint32)section.data->size();
 
                     memset(&m_SectionHeader[v].dwFlags, 0, sizeof(m_SectionHeader->dwFlags));
                     m_SectionHeader[v].dwVirtualAddr =
@@ -429,12 +444,12 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
                     m_SectionHeader[v].dwTailSharedRefCountAddr = hwc_htrc;
                     htrc[v + 1] = 0;
 
-                    // section name ($$XTIMAGE, longer than the 8 char PE limit)
-                    uint32 nameLen = (uint32)strlen(kTitleImageName);
+                    // section name (longer than the 8 char PE limit)
+                    uint32 nameLen = (uint32)strlen(section.name);
                     memset(secn, 0, nameLen + 1);
                     m_SectionHeader[v].dwSectionNameAddr = hwc_secn;
-                    memcpy(secn, kTitleImageName, nameLen);
-                    memcpy(m_szSectionName[v], kTitleImageName, nameLen);
+                    memcpy(secn, section.name, nameLen);
+                    memcpy(m_szSectionName[v], section.name, nameLen);
                     m_szSectionName[v][nameLen] = '\0';
                     secn += nameLen + 1;
                     hwc_secn += nameLen + 1;
@@ -445,7 +460,7 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
                     memcpy(szBuffer, &m_SectionHeader[v], sizeof(*m_SectionHeader));
                     szBuffer += sizeof(*m_SectionHeader);
 
-                    printf("OK ($$XTIMAGE)\n");
+                    printf("OK (%s)\n", section.name);
                     continue;
                 }
 
@@ -664,11 +679,12 @@ Xbe::Xbe(class Exe *x_Exe, const char *x_szTitle, bool x_bRetail, const std::vec
 
                 memset(m_bzSection[v], 0, maxSize);
 
-                if(hasTitleImage && v == exeSections)
+                if(v >= exeSections)
                 {
-                    // copy the title image bytes (its raw size is rounded up, so
+                    // copy the image bytes (its raw size is rounded up, so
                     // copy only what we have and leave the padding zeroed)
-                    memcpy(m_bzSection[v], &(*x_TitleImage)[0], x_TitleImage->size());
+                    const std::vector<uint08> *data = synthetic[v - exeSections].data;
+                    memcpy(m_bzSection[v], &(*data)[0], data->size());
                 }
                 else
                 {
