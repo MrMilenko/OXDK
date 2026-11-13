@@ -1,0 +1,205 @@
+diff --git a/clang/lib/CodeGen/Targets/PPC.cpp b/clang/lib/CodeGen/Targets/PPC.cpp
+index de5a4d21d..116636a91 100644
+--- a/clang/lib/CodeGen/Targets/PPC.cpp
++++ b/clang/lib/CodeGen/Targets/PPC.cpp
+@@ -342,12 +342,14 @@ public:
+         IsXenonABI(XenonABI) {}
+ 
+   ABIArgInfo classifyReturnType(QualType RetTy) const;
++  ABIArgInfo classifyXenonArgumentType(QualType Ty) const;
+ 
+   void computeInfo(CGFunctionInfo &FI) const override {
+     if (!getCXXABI().classifyReturnType(FI))
+       FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+     for (auto &I : FI.arguments())
+-      I.info = classifyArgumentType(I.type);
++      I.info = IsXenonABI ? classifyXenonArgumentType(I.type)
++                          : classifyArgumentType(I.type);
+   }
+ 
+   RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
+@@ -398,9 +400,60 @@ CharUnits PPC32_SVR4_ABIInfo::getParamTypeAlignment(QualType Ty) const {
+   return CharUnits::fromQuantity(4);
+ }
+ 
++// Arguments under the Xbox 360 convention, as Microsoft's compiler passes them.
++//
++// A char, short or bool is passed as is: Microsoft's callers do not extend
++// them, so the callee must, and leaving off signext/zeroext makes ours do so.
++// Our caller extending anyway costs nothing and a Microsoft callee ignores it.
++//
++// An aggregate of up to eight bytes travels as its bytes in one general
++// register and its slot, never a floating point register: 1, 2 and 4 bytes
++// right justified, any other size left justified from the slot's first byte.
++// Coercing to an integer of the same size, or to i64 for the odd sizes, does
++// exactly that on a big endian target, and i64 already takes one register and
++// one slot under xenon-abi. Larger aggregates keep the SVR4 treatment (a
++// pointer to a copy), which Microsoft's code does not share; see
++// llvm/README.md.
++ABIArgInfo PPC32_SVR4_ABIInfo::classifyXenonArgumentType(QualType Ty) const {
++  Ty = useFirstFieldIfTransparentUnion(Ty);
++  if (isAggregateTypeForABI(Ty) &&
++      !getRecordArgABI(Ty, getCXXABI()) && !Ty->isAnyComplexType()) {
++    uint64_t Size = getContext().getTypeSize(Ty);
++    if (Size == 0)
++      return ABIArgInfo::getIgnore();
++    if (Size <= 64) {
++      unsigned Bits = (Size == 8 || Size == 16 || Size == 32) ? Size : 64;
++      return ABIArgInfo::getDirect(llvm::Type::getIntNTy(getVMContext(), Bits));
++    }
++  }
++  if (!isAggregateTypeForABI(Ty) && isPromotableIntegerTypeForABI(Ty) &&
++      !Ty->isBitIntType())
++    return ABIArgInfo::getDirect();
++  return classifyArgumentType(Ty);
++}
++
+ ABIArgInfo PPC32_SVR4_ABIInfo::classifyReturnType(QualType RetTy) const {
+   uint64_t Size;
+ 
++  // The Xbox 360 convention returns an aggregate of 1, 2, 4 or 8 bytes in r3,
++  // eight bytes as one 64 bit value (a struct holding one double included),
++  // and any other through a hidden pointer. A char, short or bool result is
++  // extended by our caller rather than trusted to be.
++  if (IsXenonABI) {
++    if (isAggregateTypeForABI(RetTy) && !RetTy->isAnyComplexType()) {
++      Size = getContext().getTypeSize(RetTy);
++      if (Size == 0)
++        return ABIArgInfo::getIgnore();
++      if (Size == 8 || Size == 16 || Size == 32 || Size == 64)
++        return ABIArgInfo::getDirect(
++            llvm::Type::getIntNTy(getVMContext(), Size));
++      return getNaturalAlignIndirect(RetTy, getDataLayout().getAllocaAddrSpace());
++    }
++    if (!RetTy->isVoidType() && isPromotableIntegerTypeForABI(RetTy) &&
++        !RetTy->isBitIntType())
++      return ABIArgInfo::getDirect();
++  }
++
+   // -msvr4-struct-return puts small aggregates in GPR3 and GPR4.
+   if (isAggregateTypeForABI(RetTy) && IsRetSmallStructInRegABI &&
+       (Size = getContext().getTypeSize(RetTy)) <= 64) {
+diff --git a/llvm/lib/Target/PowerPC/PPCISelDAGToDAG.cpp b/llvm/lib/Target/PowerPC/PPCISelDAGToDAG.cpp
+index fc4d6a453..250459f1c 100644
+--- a/llvm/lib/Target/PowerPC/PPCISelDAGToDAG.cpp
++++ b/llvm/lib/Target/PowerPC/PPCISelDAGToDAG.cpp
+@@ -5305,8 +5305,17 @@ void PPCDAGToDAGISel::Select(SDNode *N) {
+       report_fatal_error("Xenon home slot is not a DS-form address");
+     Register XReg(N->getConstantOperandVal(2));
+ 
+-    SDValue Ops[] = {CurDAG->getRegister(XReg, MVT::i64), Disp, Base, Chain};
+-    ReplaceNode(N, CurDAG->getMachineNode(PPC::STD, dl, MVT::Other, Ops));
++    // With a glue operand it is the read of a 64 bit result straight after a
++    // call, and stays glued to it so nothing writes the register first.
++    SmallVector<SDValue, 5> Ops = {CurDAG->getRegister(XReg, MVT::i64), Disp,
++                                   Base, Chain};
++    if (N->getNumOperands() > 3) {
++      Ops.push_back(N->getOperand(3));
++      ReplaceNode(N, CurDAG->getMachineNode(PPC::STD, dl, MVT::Other,
++                                            MVT::Glue, Ops));
++    } else {
++      ReplaceNode(N, CurDAG->getMachineNode(PPC::STD, dl, MVT::Other, Ops));
++    }
+     return;
+   }
+ 
+diff --git a/llvm/lib/Target/PowerPC/PPCISelLowering.cpp b/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
+index bcc8218bc..0b4d0e3e0 100644
+--- a/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
++++ b/llvm/lib/Target/PowerPC/PPCISelLowering.cpp
+@@ -5362,6 +5362,16 @@ static bool isFunctionGlobalAddress(const GlobalValue *GV) {
+   return false;
+ }
+ 
++// The two halves of one 64 bit result, assigned r3 and r4, on a Xenon target.
++static bool isXenonI64Pair(const PPCSubtarget &Subtarget,
++                           const SmallVectorImpl<CCValAssign> &RVLocs,
++                           unsigned i, EVT ThisVT, EVT NextVT) {
++  return Subtarget.isXenonABI() && !Subtarget.isPPC64() &&
++         i + 1 < RVLocs.size() && ThisVT == MVT::i64 && NextVT == MVT::i64 &&
++         RVLocs[i].isRegLoc() && RVLocs[i].getLocReg() == PPC::R3 &&
++         RVLocs[i + 1].isRegLoc() && RVLocs[i + 1].getLocReg() == PPC::R4;
++}
++
+ SDValue PPCTargetLowering::LowerCallResult(
+     SDValue Chain, SDValue InGlue, CallingConv::ID CallConv, bool isVarArg,
+     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
+@@ -5380,6 +5390,39 @@ SDValue PPCTargetLowering::LowerCallResult(
+     CCValAssign &VA = RVLocs[i];
+     assert(VA.isRegLoc() && "Can only return in registers!");
+ 
++    // Microsoft's compiler returns a 64 bit value whole in r3, where a 32 bit
++    // subtarget expects the halves in r3 and r4. Read all of r3 straight after
++    // the call by storing it as a doubleword, then load the halves back.
++    if (isXenonI64Pair(Subtarget, RVLocs, i, Ins[i].ArgVT,
++                       i + 1 != e ? Ins[i + 1].ArgVT : EVT())) {
++      MachineFunction &MF = DAG.getMachineFunction();
++      EVT PtrVT = getPointerTy(MF.getDataLayout());
++      int FI = MF.getFrameInfo().CreateStackObject(8, Align(8), false);
++      SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
++      // Keep r3 defined by the call for the register allocator; the value
++      // that matters is the doubleword below.
++      SDValue Low = DAG.getCopyFromReg(Chain, dl, PPC::R3, MVT::i32, InGlue);
++      Chain = Low.getValue(1);
++      InGlue = Low.getValue(2);
++      SDValue Ops[] = {Chain, Addr, DAG.getTargetConstant(PPC::X3, dl, MVT::i32),
++                       InGlue};
++      Chain = DAG.getNode(PPCISD::XENON_HOME_STD, dl,
++                          DAG.getVTList(MVT::Other, MVT::Glue), Ops);
++      InGlue = Chain.getValue(1);
++      MachinePointerInfo MPI = MachinePointerInfo::getFixedStack(MF, FI);
++      SDValue Hi = DAG.getLoad(MVT::i32, dl, Chain, Addr, MPI, Align(8));
++      SDValue Lo = DAG.getLoad(
++          MVT::i32, dl, Chain,
++          DAG.getNode(ISD::ADD, dl, PtrVT, Addr, DAG.getConstant(4, dl, PtrVT)),
++          MPI.getWithOffset(4), Align(4));
++      Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Hi.getValue(1),
++                          Lo.getValue(1));
++      InVals.push_back(Hi);
++      InVals.push_back(Lo);
++      ++i;
++      continue;
++    }
++
+     SDValue Val;
+ 
+     if (Subtarget.hasSPE() && VA.getLocVT() == MVT::f64) {
+@@ -8061,6 +8104,38 @@ PPCTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
+     CCValAssign &VA = RVLocs[i];
+     assert(VA.isRegLoc() && "Can only return in registers!");
+ 
++    // A 64 bit result goes back whole in r3, as Microsoft's compiler returns
++    // it, rather than as halves in r3 and r4. The core has no way to build a
++    // 64 bit register from two 32 bit ones, so the halves go through a stack
++    // slot and the doubleword is loaded back, glued to the return.
++    if (isXenonI64Pair(Subtarget, RVLocs, i, Outs[RealResIdx].ArgVT,
++                       RealResIdx + 1 != Outs.size() ? Outs[RealResIdx + 1].ArgVT
++                                                     : EVT())) {
++      MachineFunction &MF = DAG.getMachineFunction();
++      EVT PtrVT = getPointerTy(MF.getDataLayout());
++      int FI = MF.getFrameInfo().CreateStackObject(8, Align(8), false);
++      SDValue Addr = DAG.getFrameIndex(FI, PtrVT);
++      MachinePointerInfo MPI = MachinePointerInfo::getFixedStack(MF, FI);
++      SDValue StHi =
++          DAG.getStore(Chain, dl, OutVals[RealResIdx], Addr, MPI, Align(8));
++      SDValue StLo = DAG.getStore(
++          Chain, dl, OutVals[RealResIdx + 1],
++          DAG.getNode(ISD::ADD, dl, PtrVT, Addr, DAG.getConstant(4, dl, PtrVT)),
++          MPI.getWithOffset(4), Align(4));
++      Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, StHi, StLo);
++      SmallVector<SDValue, 4> Ops = {
++          Chain, Addr, DAG.getTargetConstant(PPC::X3, dl, MVT::i32)};
++      if (Glue.getNode())
++        Ops.push_back(Glue);
++      Chain = DAG.getNode(PPCISD::XENON_HOME_LD, dl,
++                          DAG.getVTList(MVT::Other, MVT::Glue), Ops);
++      Glue = Chain.getValue(1);
++      RetOps.push_back(DAG.getRegister(PPC::X3, MVT::i64));
++      ++i;
++      ++RealResIdx;
++      continue;
++    }
++
+     SDValue Arg = OutVals[RealResIdx];
+ 
+     switch (VA.getLocInfo()) {

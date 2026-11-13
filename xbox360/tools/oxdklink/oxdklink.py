@@ -183,7 +183,11 @@ def main():
     ap.add_argument('--keep', action='append', default=[],
                     help='force this symbol to be pulled in even if unreferenced')
     ap.add_argument('--base', default='0x82000000')
-    ap.add_argument('--stack', default='0x40000')
+    ap.add_argument('--stack', default='0x100000',
+                    help='main thread stack (default 1 MB, as imagexex gives)')
+    ap.add_argument('--sysflags', default='0x1',
+                    help='XEX system flags (default 0x1; 0x21 adds HANDLE_GAMEPAD_DISCONNECT '
+                         'for a title that shows its own reconnect screen; see cxex.cpp)')
     ap.add_argument('--name', default='title.exe')
     ap.add_argument('--title-id', default='0x0',
                     help="the title's id, as declared in its xex.xml. Anything the console "
@@ -315,7 +319,7 @@ def main():
         # cxex emits EXECUTION_INFO only for a non-zero title id, and the console keys
         # XContent by it: with 0 a title's save package resolves somewhere it will not
         # find again, and the write still reports success.
-        f.write(f"titleid {a.title_id}\nsysflags 0x00000001\npename {a.name}\n\n")
+        f.write(f"titleid {a.title_id}\nsysflags {a.sysflags}\npename {a.name}\n\n")
         for row in section_rows(final, int(a.base, 0), image_size):
             f.write(row + "\n")
         for i, (libname, ver, vmin, libid) in enumerate(LIBRARIES):

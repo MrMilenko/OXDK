@@ -33,13 +33,10 @@ SECTIONS
         *(SORT_BY_NAME(.CRT$*))
         *(.CRT)
 
-        /* Same scheme, different table: .XBMOVIE$A and $ZZZZZZZZ bracket the entries
-           between them, and unsorted the end marker lands before the entry so the table
-           reads as empty. Any other $-grouped family the XDK adds wants a line here
-           too; a family with no rule becomes an orphan and is placed by lld's own
-           heuristic rather than by this script. */
-        . = ALIGN(4);
-        *(SORT_BY_NAME(.XBMOVIE$*))
+        /* Any other $-grouped family the XDK adds wants a line in this script; a
+           family with no rule becomes an orphan and is placed by lld's own heuristic
+           rather than by this script. .XBMOVIE$ is one, and goes with the writable
+           data below. */
 
         __fini_array_start = .;
         *(.fini_array) *(.fini_array.*) *(.dtors) *(.dtors.*)
@@ -63,7 +60,14 @@ SECTIONS
     .text  : { *(.text) *(.text.*) *(SORT_BY_NAME(.text$*)) }
 
     . = ALIGN(0x10000);
-    .data  : { *(.data) *(.data.*) *(SORT_BY_NAME(.data$*)) *(SORT_BY_NAME(.rtc$*)) *(.sdata) *(.bss) *(.bss.*) *(.sbss) *(COMMON) *(.tls*) }
+    /* .XBMOVIE$ first: the XDK's libraries write these variables (XAudio2 sets
+       ?XBM__CaptureCompletionSignalXAudio when it makes its mastering voice), and
+       Microsoft's linker gives them a read/write section of their own in every XEX
+       the SDK ships. In the read-only pages that write faults. Same table scheme as
+       .CRT$: .XBMOVIE$A and $ZZZZZZZZ bracket the entries, and unsorted the end
+       marker lands before the entry so the table reads as empty. */
+    .data  : { . = ALIGN(4); *(SORT_BY_NAME(.XBMOVIE$*))
+               *(.data) *(.data.*) *(SORT_BY_NAME(.data$*)) *(SORT_BY_NAME(.rtc$*)) *(.sdata) *(.bss) *(.bss.*) *(.sbss) *(COMMON) *(.tls*) }
 
     /DISCARD/ : { *(.debug*) *(.comment) *(.note*) *(.eh_frame*) *(.XBLD*) }
 }

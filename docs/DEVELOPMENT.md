@@ -72,7 +72,12 @@ make -C xbox360/samples/d3dclear
 make -C xbox360/samples/title
 make -C xbox360/tools/abitest/console
 python3 xbox360/tools/abitest/abicheck.py --cc "$OXDK_LLVM/bin/clang" --feature xenon-abi
+python3 xbox360/tools/abitest/nvcheck.py --cc "$OXDK_LLVM/bin/clang" --qemu qemu-ppc64
+python3 xbox360/tools/abitest/callcheck.py --cc "$OXDK_LLVM/bin/clang" --qemu qemu-ppc64
 ```
+
+qemu-ppc64 is Linux's user mode qemu (Debian's qemu-user). On macOS, build the
+programs with `--keep DIR` and run them on a Linux machine.
 
 `framecheck.py` over the resulting objects checks for the frame overlaps the
 Xenon ABI makes possible.
